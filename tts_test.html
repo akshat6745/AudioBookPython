@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text-to-Speech Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 200px;
+            margin-bottom: 10px;
+            padding: 10px;
+        }
+        select {
+            margin-bottom: 10px;
+            padding: 5px;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #audioContainer {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Text-to-Speech Test</h1>
+
+    <div>
+        <label for="textInput">Enter text to convert to speech:</label>
+        <textarea id="textInput" placeholder="Type your text here...">Hello, this is a test of the text to speech API using Edge TTS.</textarea>
+    </div>
+
+    <div>
+        <label for="voiceSelect">Select voice:</label>
+        <select id="voiceSelect">
+            <option value="en-US-ChristopherNeural">Christopher (Male, US)</option>
+            <option value="en-US-JennyNeural">Jenny (Female, US)</option>
+            <option value="en-GB-SoniaNeural">Sonia (Female, UK)</option>
+            <option value="en-GB-RyanNeural">Ryan (Male, UK)</option>
+        </select>
+    </div>
+
+    <button id="convertBtn">Convert to Speech</button>
+
+    <div id="audioContainer"></div>
+
+    <script>
+        document.getElementById('convertBtn').addEventListener('click', async () => {
+            const text = document.getElementById('textInput').value;
+            const voice = document.getElementById('voiceSelect').value;
+
+            if (!text) {
+                alert('Please enter some text');
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8001/tts', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ text, voice })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const blob = await response.blob();
+                const audioUrl = URL.createObjectURL(blob);
+
+                const audioContainer = document.getElementById('audioContainer');
+                audioContainer.innerHTML = `
+                    <h3>Generated Audio:</h3>
+                    <audio controls autoplay>
+                        <source src="${audioUrl}" type="audio/mpeg">
+                        Your browser does not support the audio element.
+                    </audio>
+                    <p><a href="${audioUrl}" download="speech.mp3">Download audio file</a></p>
+                `;
+            } catch (error) {
+                console.error('Error:', error);
+                alert(`Error: ${error.message}`);
+            }
+        });
+    </script>
+</body>
+</html>

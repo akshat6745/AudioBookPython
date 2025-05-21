@@ -1,0 +1,31 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and virtual environments
+.env
+venv/
+env/
+ENV/
+
+# Logs
+*.log
+debug.log
+
+# Generated audio files
+*.mp3
+
+# IDE specific files
+.idea/
+.vscode/
+
+# Temporary files
+*.swp
+*~
+.DS_Store
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
