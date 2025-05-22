@@ -1,0 +1,60 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment variables
+.env
+.env.example
+.env.sample
+
+# Logs
+*.log
+debug.log
+
+# Generated audio files
+*.mp3
+
+# IDE specific files
+.idea/
+.vscode/
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Testing and development
+test_*.py
+*_test.html
+
+# Deployment
+deploy_check.py
+
+# Temporary files
+*.swp
+*~
+.DS_Store
