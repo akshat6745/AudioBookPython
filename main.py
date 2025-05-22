@@ -4,19 +4,14 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 import aiohttp
-import requests
-import tempfile
-import asyncio
 import edge_tts
 import io
-from typing import List, Dict, Optional
+from typing import List, Optional
 import os
 import re
 from dotenv import load_dotenv
 from fake_useragent import UserAgent
 from contextlib import asynccontextmanager
-
-import undetected_chromedriver as uc
 
 
 # Load environment variables
@@ -45,6 +40,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/health", status_code=200)
+def health_check():
+    """
+    Health check endpoint for monitoring and Docker health checks
+    """
+    return {"status": "healthy"}
 
 # Create headers with rotating user agent
 def get_headers():
