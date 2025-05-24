@@ -25,7 +25,7 @@ RUN chown -R appuser:appuser /app
 
 # Environment config
 ENV HOST=0.0.0.0
-ENV PORT=8000
+ENV PORT=8080
 ENV ENVIRONMENT=production
 ENV LOG_LEVEL=INFO
 ENV PYTHONUNBUFFERED=1
@@ -34,11 +34,7 @@ ENV PYTHONUNBUFFERED=1
 USER appuser
 
 # Expose port
-EXPOSE 8000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8000/health || exit 1
+EXPOSE 8080
 
 # Run FastAPI with Gunicorn + UvicornWorker
-CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--workers", "2", "--timeout", "120", "main:app"]
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8080", "--workers", "2", "--timeout", "120", "main:app"]
