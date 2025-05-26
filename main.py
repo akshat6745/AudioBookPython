@@ -12,6 +12,7 @@ import re
 from dotenv import load_dotenv
 from fake_useragent import UserAgent
 from contextlib import asynccontextmanager
+from pymongo import MongoClient
 
 
 # Load environment variables
@@ -19,6 +20,12 @@ load_dotenv()
 
 # Initialize session
 session = None
+
+# MongoDB connection
+MONGO_URI = "mongodb+srv://akshataggarwal6745:HHouAVw7iIbb1LQt@cluster0.gwwh0wj.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db = client["audiobook"]  # Use a database name, e.g., 'audiobook'
+users_collection = db["users"]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -326,8 +333,8 @@ async def process_tts_request(request: TTSRequest = None, text: str = None, voic
             
         # Preprocess the text to handle special patterns
         # Replace ellipses and asterisks with appropriate speech text
-        text_to_convert = text_to_convert.replace("...", " pause ")
-        text_to_convert = text_to_convert.replace("***", " break ")
+        text_to_convert = text_to_convert.replace("...", "")
+        text_to_convert = text_to_convert.replace("***", "Asterisk Asterisk Asterisk")
         
         # Handle empty or too short text after preprocessing
         if not text_to_convert or text_to_convert.isspace():
@@ -359,6 +366,28 @@ async def process_tts_request(request: TTSRequest = None, text: str = None, voic
     except Exception as e:
         print(f"Error in text-to-speech conversion: {e}")
         raise HTTPException(status_code=500, detail=f"Error in text-to-speech conversion: {str(e)}")
+
+class UserLoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/userLogin")
+def user_login(request: UserLoginRequest):
+    user = users_collection.find_one({"username": request.username})
+    if user and user.get("password") == request.password:
+        return {"status": "success", "message": "Login successful"}
+    raise HTTPException(status_code=401, detail="Invalid username or password")
+
+class UserRegisterRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/register")
+def register_user(request: UserRegisterRequest):
+    if users_collection.find_one({"username": request.username}):
+        raise HTTPException(status_code=400, detail="Username already exists")
+    users_collection.insert_one({"username": request.username, "password": request.password})
+    return {"status": "success", "message": "User registered successfully"}
 
 if __name__ == "__main__":
     import uvicorn

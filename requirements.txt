@@ -10,3 +10,4 @@ edge-tts==7.0.2
 pydantic==2.6.3
 gunicorn==21.2.0
 undetected-chromedriver==3.5.4
+pymongo==4.7.2
