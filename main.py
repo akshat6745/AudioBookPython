@@ -285,6 +285,8 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
         main_content = soup.find('main') or soup.find('article') or soup.body
         if main_content:
             paragraphs = [p.text.strip() for p in main_content.find_all('p') if p.text.strip()]
+            paragraphs = [p for p in paragraphs if not p.startswith("If you find any errors") and not p.startswith("Search the NovelFire.net")]
+            
             if paragraphs:
                 return {"content": paragraphs}
 
@@ -333,9 +335,14 @@ async def process_tts_request(request: TTSRequest = None, text: str = None, voic
             
         # Preprocess the text to handle special patterns
         # Replace ellipses and asterisks with appropriate speech text
-        text_to_convert = text_to_convert.replace("...", "")
         text_to_convert = text_to_convert.replace("***", "Asterisk Asterisk Asterisk")
-        
+        # text_to_convert = re.sub(r'[^.]*Google[^.]*\.', '', text_to_convert, flags=re.IGNORECASE)
+        text_to_convert = re.sub(
+            r'\s*([^S]*?website on Google to access chapters of novels early and in the highest quality[^.]*\.)\s*',
+            ' ',
+            text_to_convert,
+            flags=re.IGNORECASE
+        )
         # Handle empty or too short text after preprocessing
         if not text_to_convert or text_to_convert.isspace():
             text_to_convert = ""
@@ -388,6 +395,54 @@ def register_user(request: UserRegisterRequest):
         raise HTTPException(status_code=400, detail="Username already exists")
     users_collection.insert_one({"username": request.username, "password": request.password})
     return {"status": "success", "message": "User registered successfully"}
+
+class NovelProgress(BaseModel):
+    novelName: str
+    lastChapterRead: int
+
+class UserProgressRequest(BaseModel):
+    username: str
+    novelName: str
+    lastChapterRead: int
+
+class UserProgressFetchRequest(BaseModel):
+    username: str
+
+@app.post("/user/progress")
+def save_user_progress(request: UserProgressRequest):
+    user = users_collection.find_one({"username": request.username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    # Update or add progress for the novel
+    progress = user.get("progress", [])
+    updated = False
+    for entry in progress:
+        if entry["novelName"] == request.novelName:
+            entry["lastChapterRead"] = request.lastChapterRead
+            updated = True
+            break
+    if not updated:
+        progress.append({"novelName": request.novelName, "lastChapterRead": request.lastChapterRead})
+    users_collection.update_one({"username": request.username}, {"$set": {"progress": progress}})
+    return {"status": "success", "message": "Progress saved"}
+
+@app.get("/user/progress")
+def get_all_user_progress(username: str):
+    user = users_collection.find_one({"username": username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"progress": user.get("progress", [])}
+
+@app.get("/user/progress/{novelName}")
+def get_user_progress_for_novel(novelName: str, username: str):
+    user = users_collection.find_one({"username": username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    progress = user.get("progress", [])
+    for entry in progress:
+        if entry["novelName"] == novelName:
+            return {"novelName": novelName, "lastChapterRead": entry["lastChapterRead"]}
+    return {"novelName": novelName, "lastChapterRead": 1}
 
 if __name__ == "__main__":
     import uvicorn
