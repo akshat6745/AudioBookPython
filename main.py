@@ -12,20 +12,20 @@ import re
 from dotenv import load_dotenv
 from fake_useragent import UserAgent
 from contextlib import asynccontextmanager
-from pymongo import MongoClient
+import firebase_admin
+from firebase_admin import credentials, firestore
 
+cred = credentials.Certificate("serviceAccountFirebase.json")
+firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+users_collection = db.collection("users")
 
 # Load environment variables
 load_dotenv()
 
 # Initialize session
 session = None
-
-# MongoDB connection
-MONGO_URI = "mongodb+srv://akshataggarwal6745:HHouAVw7iIbb1LQt@cluster0.gwwh0wj.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-client = MongoClient(MONGO_URI)
-db = client["audiobook"]  # Use a database name, e.g., 'audiobook'
-users_collection = db["users"]
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -380,8 +380,9 @@ class UserLoginRequest(BaseModel):
 
 @app.post("/userLogin")
 def user_login(request: UserLoginRequest):
-    user = users_collection.find_one({"username": request.username})
-    if user and user.get("password") == request.password:
+    user_docs = users_collection.where("username", "==", request.username).stream()
+    user = next(user_docs, None)
+    if user and user.to_dict().get("password") == request.password:
         return {"status": "success", "message": "Login successful"}
     raise HTTPException(status_code=401, detail="Invalid username or password")
 
@@ -391,9 +392,10 @@ class UserRegisterRequest(BaseModel):
 
 @app.post("/register")
 def register_user(request: UserRegisterRequest):
-    if users_collection.find_one({"username": request.username}):
+    user_docs = users_collection.where("username", "==", request.username).stream()
+    if next(user_docs, None):
         raise HTTPException(status_code=400, detail="Username already exists")
-    users_collection.insert_one({"username": request.username, "password": request.password})
+    users_collection.add({"username": request.username, "password": request.password, "progress": []})
     return {"status": "success", "message": "User registered successfully"}
 
 class NovelProgress(BaseModel):
@@ -410,11 +412,12 @@ class UserProgressFetchRequest(BaseModel):
 
 @app.post("/user/progress")
 def save_user_progress(request: UserProgressRequest):
-    user = users_collection.find_one({"username": request.username})
-    if not user:
+    user_docs = users_collection.where("username", "==", request.username).stream()
+    user_doc = next(user_docs, None)
+    if not user_doc:
         raise HTTPException(status_code=404, detail="User not found")
-    # Update or add progress for the novel
-    progress = user.get("progress", [])
+    user_data = user_doc.to_dict()
+    progress = user_data.get("progress", [])
     updated = False
     for entry in progress:
         if entry["novelName"] == request.novelName:
@@ -423,22 +426,24 @@ def save_user_progress(request: UserProgressRequest):
             break
     if not updated:
         progress.append({"novelName": request.novelName, "lastChapterRead": request.lastChapterRead})
-    users_collection.update_one({"username": request.username}, {"$set": {"progress": progress}})
+    users_collection.document(user_doc.id).update({"progress": progress})
     return {"status": "success", "message": "Progress saved"}
 
 @app.get("/user/progress")
 def get_all_user_progress(username: str):
-    user = users_collection.find_one({"username": username})
-    if not user:
+    user_docs = users_collection.where("username", "==", username).stream()
+    user_doc = next(user_docs, None)
+    if not user_doc:
         raise HTTPException(status_code=404, detail="User not found")
-    return {"progress": user.get("progress", [])}
+    return {"progress": user_doc.to_dict().get("progress", [])}
 
 @app.get("/user/progress/{novelName}")
 def get_user_progress_for_novel(novelName: str, username: str):
-    user = users_collection.find_one({"username": username})
-    if not user:
+    user_docs = users_collection.where("username", "==", username).stream()
+    user_doc = next(user_docs, None)
+    if not user_doc:
         raise HTTPException(status_code=404, detail="User not found")
-    progress = user.get("progress", [])
+    progress = user_doc.to_dict().get("progress", [])
     for entry in progress:
         if entry["novelName"] == novelName:
             return {"novelName": novelName, "lastChapterRead": entry["lastChapterRead"]}
