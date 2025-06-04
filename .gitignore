@@ -29,3 +29,5 @@ debug.log
 dist/
 build/
 *.egg-info/
+
+serviceAccountFirebase.json
