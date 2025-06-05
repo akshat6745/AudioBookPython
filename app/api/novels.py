@@ -10,21 +10,83 @@ router = APIRouter()
 
 session = None  # This will be set by the main app
 
-@router.get("/novels", response_model=List[str])
+from app.models.schemas import NovelInfo
+from app.core.db import db
+
+novels_collection = db.collection("novels")
+
+@router.get("/novels", response_model=List[NovelInfo])
 async def fetch_names():
     try:
+        # Fetch novels from Google Doc
         url = f"https://docs.google.com/document/d/{DOC_ID}/export?format=txt"
         async with session.get(url, headers=get_headers()) as response:
             response.raise_for_status()
             text = await response.text()
-        novels = [line.strip() for line in text.split('\n') if line.strip()]
-        return novels
+        doc_novels = [NovelInfo(
+            id=None,
+            title=line.strip(),
+            author=None,
+            chapterCount=None,
+            source="google_doc"
+        ) for line in text.split('\n') if line.strip()]
+        
+        # Fetch novels from Firestore
+        db_novels = []
+        for doc in novels_collection.stream():
+            data = doc.to_dict()
+            db_novels.append(NovelInfo(
+                id=doc.id,
+                title=data.get("title"),
+                author=data.get("author"),
+                chapterCount=data.get("chapterCount"),
+                source="epub_upload"
+            ))
+        
+        # Combine both sources
+        return doc_novels + db_novels
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching novels: {str(e)}")
 
 @router.get("/chapters-with-pages/{novel_name}")
 async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
     try:
+        # First try to find the novel in Firestore
+        novels = novels_collection.where("title", "==", novel_name).stream()
+        novel_doc = next(novels, None)
+        
+        if novel_doc:
+            # Novel exists in Firestore, fetch its chapters
+            chapters_collection = novel_doc.reference.collection("chapters")
+            # Calculate pagination
+            start = (page - 1) * 50
+            end = start + 50
+            
+            # Query chapters in order
+            chapters_query = chapters_collection.order_by("chapterNumber").offset(start).limit(50)
+            chapters = []
+            
+            for chapter_doc in chapters_query.stream():
+                chapter_data = chapter_doc.to_dict()
+                chapter_info = {
+                    "chapterNumber": chapter_data["chapterNumber"],
+                    "chapterTitle": chapter_data["chapterTitle"],
+                    "id": chapter_doc.id
+                }
+                chapters.append(chapter_info)
+            
+            # Get total chapter count from the novel document
+            total_chapters = novel_doc.get("chapterCount")
+            total_pages = (total_chapters + 49) // 50  # Round up division
+            
+            return {
+                "chapters": chapters,
+                "total_pages": total_pages,
+                "current_page": page
+            }
+        
+        # If not found in Firestore, try fetching from novelfire
         url = f"https://novelfire.net/book/{novel_name}/chapters"
         if page > 1:
             url += f"?page={page}"
@@ -122,10 +184,25 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
 @router.get("/chapter")
 async def fetch_chapter(chapterNumber: int, novelName: str):
     try:
+        # First try to find the novel in Firestore
+        novels = novels_collection.where("title", "==", novelName).stream()
+        novel_doc = next(novels, None)
+        
+        if novel_doc:
+            # Novel exists in Firestore, fetch the specific chapter
+            chapter_doc = novel_doc.reference.collection("chapters").document(str(chapterNumber)).get()
+            
+            if chapter_doc.exists:
+                chapter_data = chapter_doc.to_dict()
+                return {"content": chapter_data.get("content", [])}
+        
+        # If not found in Firestore, fetch from novelfire
         link = f"https://novelfire.net/book/{novelName}/chapter-{chapterNumber}"
         async with session.get(link, headers=get_headers(), ssl=False) as response:
             response.raise_for_status()
             html = await response.text()
+            
+        # Rest of the existing novelfire parsing code
         soup = BeautifulSoup(html, 'html.parser')
         content_div = (
             soup.find('div', {'class': 'chapter-content'}) or
@@ -148,4 +225,4 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
                 return {"content": paragraphs}
         raise HTTPException(status_code=500, detail="Could not find chapter content")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}")

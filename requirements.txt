@@ -11,3 +11,5 @@ pydantic==2.6.3
 gunicorn==21.2.0
 undetected-chromedriver==3.5.4
 firebase-admin==6.4.0
+ebooklib==0.19
+python-multipart==0.0.9

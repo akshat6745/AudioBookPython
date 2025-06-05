@@ -11,7 +11,7 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 
 # Server settings
 HOST = os.getenv("HOST", "0.0.0.0")
-PORT = int(os.getenv("PORT", "8000"))
+PORT = int(os.getenv("PORT", "8080"))
 
 # API settings
 SHEET_ID = os.getenv("SHEET_ID")

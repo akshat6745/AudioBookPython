@@ -23,7 +23,7 @@ LOG_LEVEL=DEBUG
 
 3. Run the server:
 ```bash
-uvicorn main:app --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 ## API Endpoints
@@ -53,7 +53,7 @@ LOG_LEVEL=INFO
 docker-compose up -d
 ```
 
-This will start the API service on port 8000.
+This will start the API service on port 8080.
 
 ### Heroku Deployment
 
@@ -87,7 +87,7 @@ For all deployment methods, you can configure the application using environment 
 - `ENVIRONMENT`: `development` or `production` (default: `production`)
 - `DEBUG`: `True` or `False` (default: `False`)
 - `LOG_LEVEL`: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default: `INFO`)
-- `PORT`: Port to run the server on (default: `8000`)
+- `PORT`: Port to run the server on (default: `8080`)
 - `HOST`: Host to bind the server to (default: `0.0.0.0`)
 - `DEFAULT_VOICE`: Default voice for TTS (default: `en-US-ChristopherNeural`)
 
