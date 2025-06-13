@@ -1,10 +1,14 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import List, Optional
 from bs4 import BeautifulSoup
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
 import aiohttp
 import re
+from fastapi.responses import StreamingResponse
+from app.api.tts import generate_audio, text_to_speech_dual_voice
+import io
+import asyncio
 
 router = APIRouter()
 
@@ -194,7 +198,11 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
             
             if chapter_doc.exists:
                 chapter_data = chapter_doc.to_dict()
-                return {"content": chapter_data.get("content", [])}
+                return {
+                    "chapterNumber": chapterNumber,
+                    "chapterTitle": chapter_data.get("chapterTitle", "Unknown Title"),
+                    "content": chapter_data.get("content", [])
+                }
         
         # If not found in Firestore, fetch from novelfire
         link = f"https://novelfire.net/book/{novelName}/chapter-{chapterNumber}"
@@ -211,18 +219,69 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
             soup.find('div', {'class': 'chapter-content-inner'}) or
             soup.select_one('div.elementor-widget-container')
         )
+        chapter_title = soup.find('h1') or soup.find('title')
+        chapter_title_text = chapter_title.text.strip() if chapter_title else "Unknown Title"
         if content_div:
             paragraphs = [p.text.strip() for p in content_div.find_all('p') if p.text.strip()]
             if not paragraphs:
                 paragraphs = [text.strip() for text in content_div.stripped_strings if text.strip()]
             if paragraphs:
-                return {"content": paragraphs}
+                return {
+                    "chapterNumber": chapterNumber,
+                    "chapterTitle": chapter_title_text,
+                    "content": paragraphs
+                }
         main_content = soup.find('main') or soup.find('article') or soup.body
         if main_content:
             paragraphs = [p.text.strip() for p in main_content.find_all('p') if p.text.strip()]
             paragraphs = [p for p in paragraphs if not p.startswith("If you find any errors") and not p.startswith("Search the NovelFire.net")]
             if paragraphs:
-                return {"content": paragraphs}
+                return {
+                    "chapterNumber": chapterNumber,
+                    "chapterTitle": chapter_title_text,
+                    "content": paragraphs
+                }
         raise HTTPException(status_code=500, detail="Could not find chapter content")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}")
+
+@router.get("/novel-with-tts")
+async def novel_with_tts(novelName: str, chapterNumber: int, voice: str, dialogueVoice: str):
+    try:
+        # Use fetch_chapter to get parsed chapter
+        chapter = await fetch_chapter(chapterNumber, novelName)
+        paragraphs = chapter.get("content", [])
+        if not paragraphs:
+            raise HTTPException(status_code=404, detail="Chapter content not found")
+
+        # Prepare async TTS tasks for each paragraph
+        async def tts_paragraph(paragraph):
+            return await text_to_speech_dual_voice(paragraph, voice, dialogueVoice)
+
+        tasks = [tts_paragraph(p) for p in paragraphs]
+        audio_responses = await asyncio.gather(*tasks)
+
+        # Combine all mp3 audio pieces in order
+        combined_audio = io.BytesIO()
+        for resp in audio_responses:
+            # Each resp is a StreamingResponse, so we need to extract the audio bytes
+            # We'll assume the response body is a BytesIO or similar
+            if hasattr(resp, 'body_iterator'):
+                async for chunk in resp.body_iterator:
+                    combined_audio.write(chunk)
+            elif hasattr(resp, 'body'):
+                combined_audio.write(await resp.body())
+            elif hasattr(resp, 'getvalue'):
+                combined_audio.write(resp.getvalue())
+
+        combined_audio.seek(0)
+        return StreamingResponse(
+            combined_audio,
+            media_type="audio/mp3",
+            headers={
+                "Content-Disposition": f"attachment; filename=chapter_{chapterNumber}.mp3",
+                "Cache-Control": "no-cache"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating TTS: {str(e)}")

@@ -11,6 +11,11 @@ class NovelInfo(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     voice: str = "en-US-ChristopherNeural"
+    
+class TTSDualVoiceRequest(BaseModel):
+    text: str
+    paragraphVoice: str = "en-US-ChristopherNeural"
+    dialogueVoice: str = "en-US-AriaNeural"
 
 class UserLoginRequest(BaseModel):
     username: str
