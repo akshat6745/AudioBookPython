@@ -19,6 +19,97 @@ from app.core.db import db
 
 novels_collection = db.collection("novels")
 
+def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -> dict:
+    """
+    Extract paragraphs from BeautifulSoup object using various selectors.
+    
+    Args:
+        soup: BeautifulSoup object of the parsed HTML
+        chapter_title_text: The chapter title text
+        
+    Returns:
+        dict: Contains chapterTitle and content (list of paragraphs)
+        
+    Raises:
+        HTTPException: If no content could be found
+    """
+    # Try different content div selectors
+    content_div = (
+        soup.find('div', {'class': 'chapter-content'}) or
+        soup.find('div', {'id': 'chapter-content'}) or
+        soup.find('div', {'class': 'text-left'}) or
+        soup.find('div', {'class': 'chapter-content-inner'}) or
+        soup.select_one('div.elementor-widget-container')
+    )
+    
+    if content_div:
+        paragraphs = []
+        
+        # Strategy: Parse the HTML more carefully to handle mixed content
+        # Remove the title element first to avoid including it
+        title_elem = content_div.find('h1')
+        if title_elem:
+            title_elem.decompose()
+        
+        # Method 1: Try to get paragraphs from <p> tags
+        p_elements = content_div.find_all('p')
+        p_texts = []
+        for p in p_elements:
+            text = p.get_text().strip()
+            if text:
+                p_texts.append(text)
+        
+        # Method 2: Get all remaining text content after removing <p> tags
+        # Clone the content_div to avoid modifying the original
+        content_copy = content_div.__copy__()
+        
+        # Remove all <p> tags from the copy
+        for p in content_copy.find_all('p'):
+            p.decompose()
+        
+        # Get remaining text content
+        remaining_text = content_copy.get_text().strip()
+        remaining_paragraphs = []
+        
+        if remaining_text:
+            # Split by newlines and clean up
+            lines = remaining_text.split('\n')
+            for line in lines:
+                line = line.strip()
+                if line and len(line) > 10:  # Only substantial content
+                    remaining_paragraphs.append(line)
+        
+        # Combine both methods
+        paragraphs = p_texts + remaining_paragraphs
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_paragraphs = []
+        for p in paragraphs:
+            if p not in seen:
+                seen.add(p)
+                unique_paragraphs.append(p)
+        
+        if unique_paragraphs:
+            return {
+                "chapterTitle": chapter_title_text,
+                "content": unique_paragraphs
+            }
+    
+    # Fallback to main content areas
+    main_content = soup.find('main') or soup.find('article') or soup.body
+    if main_content:
+        paragraphs = [p.text.strip() for p in main_content.find_all('p') if p.text.strip()]
+        # Filter out unwanted paragraphs
+        paragraphs = [p for p in paragraphs if not p.startswith("If you find any errors") and not p.startswith("Search the NovelFire.net")]
+        if paragraphs:
+            return {
+                "chapterTitle": chapter_title_text,
+                "content": paragraphs
+            }
+    
+    raise HTTPException(status_code=500, detail="Could not find chapter content")
+
 @router.get("/novels", response_model=List[NovelInfo])
 async def fetch_names():
     try:
@@ -210,38 +301,17 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
             response.raise_for_status()
             html = await response.text()
             
-        # Rest of the existing novelfire parsing code
         soup = BeautifulSoup(html, 'html.parser')
-        content_div = (
-            soup.find('div', {'class': 'chapter-content'}) or
-            soup.find('div', {'id': 'chapter-content'}) or
-            soup.find('div', {'class': 'text-left'}) or
-            soup.find('div', {'class': 'chapter-content-inner'}) or
-            soup.select_one('div.elementor-widget-container')
-        )
         chapter_title = soup.find('h1') or soup.find('title')
         chapter_title_text = chapter_title.text.strip() if chapter_title else "Unknown Title"
-        if content_div:
-            paragraphs = [p.text.strip() for p in content_div.find_all('p') if p.text.strip()]
-            if not paragraphs:
-                paragraphs = [text.strip() for text in content_div.stripped_strings if text.strip()]
-            if paragraphs:
-                return {
-                    "chapterNumber": chapterNumber,
-                    "chapterTitle": chapter_title_text,
-                    "content": paragraphs
-                }
-        main_content = soup.find('main') or soup.find('article') or soup.body
-        if main_content:
-            paragraphs = [p.text.strip() for p in main_content.find_all('p') if p.text.strip()]
-            paragraphs = [p for p in paragraphs if not p.startswith("If you find any errors") and not p.startswith("Search the NovelFire.net")]
-            if paragraphs:
-                return {
-                    "chapterNumber": chapterNumber,
-                    "chapterTitle": chapter_title_text,
-                    "content": paragraphs
-                }
-        raise HTTPException(status_code=500, detail="Could not find chapter content")
+        
+        # Use the new extract_paragraphs_from_soup function
+        result = extract_paragraphs_from_soup(soup, chapter_title_text)
+        return {
+            "chapterNumber": chapterNumber,
+            "chapterTitle": result["chapterTitle"],
+            "content": result["content"]
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}")
 

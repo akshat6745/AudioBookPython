@@ -3,11 +3,10 @@ uvicorn==0.27.1
 requests==2.31.0
 beautifulsoup4==4.12.3
 python-dotenv==1.0.1
-aiohttp==3.9.3
-aiohttp[speedups]
+aiohttp==3.12.13
 fake-useragent==1.4.0
 edge-tts==7.0.2
-pydantic==2.6.3
+pydantic==2.11.7
 gunicorn==21.2.0
 undetected-chromedriver==3.5.4
 firebase-admin==6.4.0
