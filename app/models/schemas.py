@@ -7,6 +7,8 @@ class NovelInfo(BaseModel):
     author: Optional[str] = None
     chapterCount: Optional[int] = None
     source: str
+    hasImages: Optional[bool] = False
+    imageCount: Optional[int] = 0
 
 class TTSRequest(BaseModel):
     text: str
@@ -52,3 +54,15 @@ class NovelUploadResponse(BaseModel):
     author: str
     chapterCount: int
     message: str = "Novel uploaded and parsed successfully"
+
+class ImageInfo(BaseModel):
+    id: str
+    originalPath: str
+    contentType: str
+    size: int
+    url: str
+
+class NovelImagesResponse(BaseModel):
+    novelId: str
+    images: List[ImageInfo]
+    count: int

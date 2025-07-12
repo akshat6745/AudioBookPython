@@ -135,7 +135,9 @@ async def fetch_names():
                 title=data.get("title"),
                 author=data.get("author"),
                 chapterCount=data.get("chapterCount"),
-                source="epub_upload"
+                source="epub_upload",
+                hasImages=data.get("hasImages", False),
+                imageCount=data.get("imageCount", 0)
             ))
         
         # Combine both sources
