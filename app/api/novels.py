@@ -323,17 +323,23 @@ async def novel_with_tts(novelName: str, chapterNumber: int, voice: str, dialogu
         # Use fetch_chapter to get parsed chapter
         chapter = await fetch_chapter(chapterNumber, novelName)
         paragraphs = chapter.get("content", [])
+        chapter_title = chapter.get("chapterTitle", "Unknown Title")
+        
         if not paragraphs:
             raise HTTPException(status_code=404, detail="Chapter content not found")
 
-        # Prepare async TTS tasks for each paragraph
+        # Prepare async TTS tasks - first generate audio for chapter title, then for each paragraph
         async def tts_paragraph(paragraph):
             return await text_to_speech_dual_voice(paragraph, voice, dialogueVoice)
 
-        tasks = [tts_paragraph(p) for p in paragraphs]
+        # Create a list of all text segments to convert, starting with the chapter title
+        all_text_segments = [chapter_title] + paragraphs
+        
+        # Generate TTS for all segments (title + paragraphs)
+        tasks = [tts_paragraph(segment) for segment in all_text_segments]
         audio_responses = await asyncio.gather(*tasks)
 
-        # Combine all mp3 audio pieces in order
+        # Combine all mp3 audio pieces in order (title first, then paragraphs)
         combined_audio = io.BytesIO()
         for resp in audio_responses:
             # Each resp is a StreamingResponse, so we need to extract the audio bytes

@@ -155,6 +155,22 @@ Request:
 Response:
 - Audio file (audio/mp3)
 
+#### 4.2 Convert Chapter to Speech with Dual Voices
+```
+GET /novel-with-tts
+```
+Fetch a novel chapter and convert it to speech using dual voices. The generated audio includes the chapter title at the beginning, followed by the chapter content.
+
+Parameters:
+- `novelName` (string, required): Name of the novel (URL encoded)
+- `chapterNumber` (integer, required): Chapter number to fetch
+- `voice` (string, required): Voice for narrative/paragraph content
+- `dialogueVoice` (string, required): Voice for dialogue content
+
+Response:
+- Audio file (audio/mp3)
+- Headers: `Content-Disposition: attachment; filename=chapter_{chapterNumber}.mp3`
+
 ### 5. User Management
 
 #### 5.1 User Login
