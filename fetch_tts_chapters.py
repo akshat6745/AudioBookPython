@@ -25,12 +25,12 @@ async def fetch_novel_with_tts(session, novel_name, chapter_number, voice="en-US
         return None
 
 async def main():
-    novel_name = "damn-reincarnation"
-    start_chapter = 587
-    end_chapter = 620
+    novel_name = "lord-of-mysteries-2-circle-of-inevitability"
+    start_chapter = 477
+    end_chapter = 490
     
     # Create downloads folder if it doesn't exist
-    downloads_folder = Path.home() / "Downloads" / "damn-reincarnation-tts"
+    downloads_folder = Path.home() / "Downloads" / "lord-of-mysteries-2-circle-of-inevitability-tts"
     downloads_folder.mkdir(parents=True, exist_ok=True)
     
     print(f"Downloading TTS audio for chapters {start_chapter}-{end_chapter} of {novel_name}")

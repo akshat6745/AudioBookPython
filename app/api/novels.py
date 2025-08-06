@@ -174,7 +174,8 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
                 chapters.append(chapter_info)
             
             # Get total chapter count from the novel document
-            total_chapters = novel_doc.get("chapterCount")
+            novel_data = novel_doc.to_dict()
+            total_chapters = novel_data.get("chapterCount", 0)
             total_pages = (total_chapters + 49) // 50  # Round up division
             
             return {

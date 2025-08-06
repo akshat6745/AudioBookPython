@@ -12,3 +12,4 @@ undetected-chromedriver==3.5.4
 firebase-admin==6.4.0
 ebooklib==0.19
 python-multipart==0.0.9
+Brotli==1.1.0
