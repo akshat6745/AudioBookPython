@@ -1,0 +1,32 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: audiobooks-api
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/concurrency: "80"
+    spec:
+      containers:
+        - image: us-central1-docker.pkg.dev/PROJECT_ID/audiobooks/audiobooks-api:latest
+          env:
+            - name: ENVIRONMENT
+              value: production
+            - name: LOG_LEVEL
+              value: INFO
+            - name: SHEET_ID
+              value: SHEET_ID_VALUE
+            # Prefer ADC on GCP; optionally source secret env var if needed
+            # - name: FIREBASE_CREDENTIALS
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: FIREBASE_CREDENTIALS
+            #       key: latest
+          ports:
+            - containerPort: 8080
+

@@ -1,0 +1,36 @@
+steps:
+  - id: 'Build image'
+    name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '$_IMAGE', '.']
+
+  - id: 'Push image'
+    name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '$_IMAGE']
+
+  - id: 'Deploy to Cloud Run'
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - $_SERVICE
+      - --image=$_IMAGE
+      - --region=$_REGION
+      - --platform=managed
+      - --allow-unauthenticated
+      - --set-env-vars=ENVIRONMENT=production,LOG_LEVEL=INFO,SHEET_ID=$_SHEET_ID
+      - --update-secrets=FIREBASE_CREDENTIALS=projects/$_PROJECT_ID/secrets/FIREBASE_CREDENTIALS:latest
+
+substitutions:
+  _PROJECT_ID: ${PROJECT_ID}
+  _REGION: us-central1
+  _SERVICE: audiobooks-api
+  _IMAGE: us-central1-docker.pkg.dev/${PROJECT_ID}/audiobooks/audiobooks-api:latest
+  _SHEET_ID: ""
+
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/audiobooks/audiobooks-api:latest'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+

@@ -17,13 +17,29 @@ def is_local_env():
 
 # Initialize Firebase
 if not firebase_admin._apps:
-    if is_local_env():
-        print("Initializing Firebase from local serviceAccountFirebase.json...")
-        cred = credentials.Certificate("serviceAccountFirebase.json")
-    else:
-        print("Initializing Firebase from FIREBASE_CREDENTIALS environment variable...")
-        firebase_creds = os.getenv("FIREBASE_CREDENTIALS")
-        cred = credentials.Certificate(json.loads(firebase_creds))
+    cred = None
+    try:
+        if is_local_env():
+            if os.path.exists("serviceAccountFirebase.json"):
+                print("Initializing Firebase from local serviceAccountFirebase.json...")
+                cred = credentials.Certificate("serviceAccountFirebase.json")
+            elif os.getenv("FIREBASE_CREDENTIALS"):
+                print("Initializing Firebase from FIREBASE_CREDENTIALS environment variable (local)...")
+                cred = credentials.Certificate(json.loads(os.getenv("FIREBASE_CREDENTIALS")))
+            else:
+                print("Initializing Firebase using Application Default Credentials (local fallback)...")
+                cred = credentials.ApplicationDefault()
+        else:
+            if os.getenv("FIREBASE_CREDENTIALS"):
+                print("Initializing Firebase from FIREBASE_CREDENTIALS environment variable (prod)...")
+                cred = credentials.Certificate(json.loads(os.getenv("FIREBASE_CREDENTIALS")))
+            else:
+                print("Initializing Firebase using Application Default Credentials (GCP)...")
+                cred = credentials.ApplicationDefault()
+    except Exception as init_err:
+        # Final fallback to ADC if anything above fails
+        print(f"Firebase explicit credentials failed ({init_err}); falling back to Application Default Credentials...")
+        cred = credentials.ApplicationDefault()
 
     firebase_admin.initialize_app(cred)
 
