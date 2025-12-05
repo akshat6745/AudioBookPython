@@ -25,12 +25,12 @@ async def fetch_novel_with_tts(session, novel_name, chapter_number, voice="en-US
         return None
 
 async def main():
-    novel_name = "lord-of-mysteries-2-circle-of-inevitability"
-    start_chapter = 477
-    end_chapter = 490
+    novel_name = "the-perfect-run/chapters"
+    start_chapter = 101
+    end_chapter = 120
     
     # Create downloads folder if it doesn't exist
-    downloads_folder = Path.home() / "Downloads" / "lord-of-mysteries-2-circle-of-inevitability-tts"
+    downloads_folder = Path.home() / "Downloads" / "the-perfect-run-tts"
     downloads_folder.mkdir(parents=True, exist_ok=True)
     
     print(f"Downloading TTS audio for chapters {start_chapter}-{end_chapter} of {novel_name}")
@@ -41,7 +41,7 @@ async def main():
         for chapter_num in range(start_chapter, end_chapter + 1):
             print(f"Fetching chapter {chapter_num}...")
             
-            audio_data = await fetch_novel_with_tts(session, novel_name, chapter_num)
+            audio_data = await fetch_novel_with_tts(session, novel_name, chapter_num, "en-US-AvaMultilingualNeural", "en-GB-RyanNeural")
             
             if audio_data:
                 # Save the audio file

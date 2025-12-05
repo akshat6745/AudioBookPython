@@ -7,9 +7,10 @@ aiohttp==3.12.13
 fake-useragent==1.4.0
 edge-tts==7.0.2
 pydantic==2.11.7
+pydantic-settings==2.2.1
 gunicorn==21.2.0
-undetected-chromedriver==3.5.4
 firebase-admin==6.4.0
 ebooklib==0.19
 python-multipart==0.0.9
 Brotli==1.1.0
+structlog==24.1.0

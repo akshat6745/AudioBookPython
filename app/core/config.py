@@ -1,5 +1,5 @@
-import os
-from dotenv import load_dotenv
+from app.core.settings import settings
 
-load_dotenv()
-DOC_ID = os.getenv('SHEET_ID') 
+DOC_ID = settings.SHEET_ID
+HOST = settings.HOST
+PORT = settings.PORT
