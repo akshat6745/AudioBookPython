@@ -67,7 +67,7 @@ async def text_to_speech_dual_voice(
     except Exception as e:
         # In a generator, we can't easily raise HTTP exceptions once streaming starts,
         # but we can log it. For now, re-raise to be caught by the caller if it hasn't started yielding.
-        raise HTTPException(status_code=500, detail=f"Error in dual-voice text-to-speech conversion: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error in dual-voice text-to-speech conversion: {str(e)}")
 
 
 async def generate_audio(text: str, voice: str):
@@ -88,6 +88,12 @@ async def generate_audio(text: str, voice: str):
         return
 
     communicate = edge_tts.Communicate(text, voice)
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            yield chunk["data"]
+    try:
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                yield chunk["data"]
+    except edge_tts.exceptions.NoAudioReceived as e:
+        print(f"Warning: No audio received for text: '{text[:50]}...' using voice {voice}. Error: {e}")
+        # Yield a small silence (e.g. 0.5s) so the audio doesn't feel cut off? 
+        # Or just return. For now, we return successfully (empty audio for this part).
+        return

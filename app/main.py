@@ -6,7 +6,7 @@ import aiohttp
 import structlog
 import logging
 import sys
-from app.api import novels, tts, user, epub
+from app.api import novels, tts, user, epub, download
 from app.core.settings import settings
 
 # Configure structlog
@@ -72,6 +72,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(novels.router)
 app.include_router(tts.router)
 app.include_router(user.router)
+app.include_router(download.router)
 app.include_router(epub.router)
 
 @app.get("/health", status_code=200)
