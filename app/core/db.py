@@ -9,9 +9,9 @@ if not firebase_admin._apps:
     cred = None
     try:
         if settings.is_local:
-            if os.path.exists("serviceAccountFirebase.json"):
-                print("Initializing Firebase from local serviceAccountFirebase.json...")
-                cred = credentials.Certificate("serviceAccountFirebase.json")
+            if os.path.exists("newServiceAccountFirebase.json"):
+                print("Initializing Firebase from local newServiceAccountFirebase.json...")
+                cred = credentials.Certificate("newServiceAccountFirebase.json")
             elif settings.FIREBASE_CREDENTIALS:
                 print("Initializing Firebase from FIREBASE_CREDENTIALS environment variable (local)...")
                 cred = credentials.Certificate(json.loads(settings.FIREBASE_CREDENTIALS))

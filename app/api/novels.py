@@ -185,97 +185,65 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
             }
         
         # If not found in Firestore, try fetching from novelfire
-        url = f"https://novelfire.net/book/{novel_name}/chapters"
-        if page > 1:
-            url += f"?page={page}"
-        for _ in range(3):
-            try:
-                async with session.get(url, headers=get_headers(), ssl=False) as response:
-                    response.raise_for_status()
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    chapters = []
-                    chapter_elements = soup.select('.chapters-list li') or soup.select('.chapter-list .item') or soup.select('.chapter-item')
-                    if not chapter_elements:
-                        chapter_elements = soup.select('.chapter-list-item') or soup.select('table.chapter-table tr') or soup.select('.list-item')
-                    for i, element in enumerate(chapter_elements):
-                        a_tag = element.find('a')
-                        if a_tag:
-                            chapter_text = a_tag.text.strip()
-                            chapter_link = a_tag['href']
-                            if not chapter_link.startswith('http'):
-                                chapter_link = f"https://novelfire.net{chapter_link}"
-                            chapter_number = None
-                            chapter_title = chapter_text
-                            match = re.search(r'chapter-(\d+)', chapter_link)
-                            if match:
-                                chapter_number = int(match.group(1))
-                            if not chapter_number:
-                                chapter_number = (page - 1) * 50 + i + 1
-                            chapter_info = {
-                                "chapterNumber": chapter_number,
-                                "chapterTitle": chapter_title,
-                                "link": chapter_link
-                            }
-                            chapters.append(chapter_info)
-                    total_pages = 1
-                    pagination = soup.select('.pagination') or soup.select('.pages') or soup.select('.page-list')
-                    if pagination:
-                        page_links = pagination[0].select('a')
-                        page_numbers = []
-                        for link in page_links:
-                            page_match = re.search(r'page=(\d+)', link.get('href', ''))
-                            if page_match:
-                                page_numbers.append(int(page_match.group(1)))
-                            elif link.text.strip().isdigit():
-                                page_numbers.append(int(link.text.strip()))
-                        if page_numbers:
-                            total_pages = max(page_numbers)
-                    if total_pages == 1:
-                        last_page = soup.select_one('.pagination a:last-child') or soup.select_one('.page-item:last-child a')
-                        if last_page and last_page.get('href'):
-                            page_match = re.search(r'page=(\d+)', last_page.get('href', ''))
-                            if page_match:
-                                total_pages = int(page_match.group(1))
-                    chapter_count_elem = soup.select_one('.chapter-count') or soup.select_one('.total-chapters')
-                    total_chapters = None
-                    if chapter_count_elem:
-                        count_match = re.search(r'of\s+(\d+)', chapter_count_elem.text)
-                        if count_match:
-                            total_chapters = int(count_match.group(1))
-                            chapters_per_page = len(chapters)
-                            if chapters_per_page > 0:
-                                total_pages = max(total_pages, (total_chapters + chapters_per_page - 1) // chapters_per_page)
-                    if chapters:
-                        return {
-                            "chapters": chapters,
-                            "total_pages": total_pages,
-                            "current_page": page
-                        }
-                    for a_tag in soup.find_all('a', href=True):
-                        href = a_tag['href']
-                        if 'chapter-' in href:
-                            chapter_text = a_tag.text.strip()
-                            chapter_link = href if href.startswith('http') else f"https://novelfire.net{href}"
-                            match = re.search(r'chapter-(\d+)', href)
-                            if match:
-                                chapter_number = int(match.group(1))
-                                chapter_info = {
-                                    "chapterNumber": chapter_number,
-                                    "chapterTitle": chapter_text,
-                                    "link": chapter_link
-                                }
-                                chapters.append(chapter_info)
-                    if chapters:
-                        return {
-                            "chapters": chapters,
-                            "total_pages": total_pages,
-                            "current_page": page
-                        }
-                    raise HTTPException(status_code=500, detail="Could not parse chapter list")
-            except Exception as e:
-                continue
-        raise HTTPException(status_code=500, detail="Failed to fetch chapters after multiple attempts")
+        # New approach: Use their internal AJAX API
+        try:
+            # 1. Get the chapters page to find the post_id
+            chapters_url = f"https://novelfire.net/book/{novel_name}/chapters"
+            async with session.get(chapters_url, headers=get_headers(), ssl=False) as response:
+                response.raise_for_status()
+                html = await response.text()
+            
+            # 2. Extract post_id
+            match = re.search(r'post_id=(\d+)', html)
+            if not match:
+                raise HTTPException(status_code=500, detail="Could not find novel ID (post_id) for external fetch")
+            
+            post_id = match.group(1)
+            
+            # 3. Call the AJAX endpoint
+            # Calculate pagination params
+            start = (page - 1) * 50
+            length = 50
+            
+            ajax_url = f"https://novelfire.net/listChapterDataAjax?post_id={post_id}&draw=1&start={start}&length={length}"
+            
+            async with session.get(ajax_url, headers=get_headers(), ssl=False) as ajax_response:
+                ajax_response.raise_for_status()
+                data = await ajax_response.json()
+                
+                # 4. Parse response
+                chapters = []
+                for item in data.get('data', []):
+                    # Item format: {'n_sort': 1, 'slug': 'chapter-1-...', 'title': 'Chapter 1: ...', ...}
+                    chapter_number = item.get('n_sort')
+                    chapter_title = item.get('title')
+                    slug = item.get('slug')
+                    
+                    # Ensure full link
+                    chapter_link = f"https://novelfire.net/book/{novel_name}/{slug}"
+                    
+                    chapters.append({
+                        "chapterNumber": int(chapter_number) if chapter_number else None,
+                        "chapterTitle": chapter_title,
+                        "link": chapter_link
+                    })
+                    
+                # 5. Calculate totals
+                total_records = int(data.get('recordsTotal', 0))
+                total_pages = (total_records + 49) // 50
+                
+                if not chapters and page > 1 and page <= total_pages:
+                     # If we got no chapters but page seems valid, something might be wrong, but let's return empty
+                     pass
+                     
+                return {
+                    "chapters": chapters,
+                    "total_pages": total_pages,
+                    "current_page": page
+                }
+
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error fetching chapters from external source: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chapters: {str(e)}")
 
