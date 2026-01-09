@@ -78,6 +78,58 @@ test_data3 = {
     }
 }
 
+test_data4 = {
+    "chapter_title_text": "Chapter X: Meeting the Turtle",
+    "soup": """
+    <div class="chapter-content">
+        <p>Su Yu said, "Senior—"</p>
+        <p>"Just call me old turtle. There is no need to refer to me as a senior."</p>
+        Su Yu continued, "Senior, if I recall correctly, the looping turtles are known for their incredible defense. Can I ask if that is due to natural talent or if it is a result of body forging? And how strong is the looping turtles' defenses compared with the iron devourers?"<p>The turtle blanked out slightly before answering, "It's hard to answer that. We specialize in defense, but that's mostly due to our natural talent and our shell. As for the iron devourers...they have probably obtained their strong defense from body forging."</p>
+        <p>Su Yu asked in a straightforward manner, "Are you a Cloudbreach or a Mountainsea, Senior?"</p>
+        <p>He couldn't see through the turtle's cultivation.</p>
+        <p>"You can consider me an early Mountainsea."</p>
+    </div>
+    """,
+    "expected_output": {
+        "chapter_title": "Chapter X: Meeting the Turtle",
+        "paragraphs": [
+            'Su Yu said, "Senior—"',
+            '"Just call me old turtle. There is no need to refer to me as a senior."',
+            'Su Yu continued, "Senior, if I recall correctly, the looping turtles are known for their incredible defense. Can I ask if that is due to natural talent or if it is a result of body forging? And how strong is the looping turtles\' defenses compared with the iron devourers?"',
+            'The turtle blanked out slightly before answering, "It\'s hard to answer that. We specialize in defense, but that\'s mostly due to our natural talent and our shell. As for the iron devourers...they have probably obtained their strong defense from body forging."',
+            'Su Yu asked in a straightforward manner, "Are you a Cloudbreach or a Mountainsea, Senior?"',
+            "He couldn't see through the turtle's cultivation.",
+            '"You can consider me an early Mountainsea."'
+        ]
+    }
+}
+
+test_data5 = {
+    "chapter_title_text": "Chapter Y: Little Fatty",
+    "soup": """
+    <div class="chapter-content">
+        <p>Zhu Tiandao smiled and said, "Half a student is still a student, right? Of course, Silk Destroying King is definitely uninterested in formally acknowledging this student. It's fine. Su Yu is quite an arrogant kid as well. He might not be willing-cough, cough. My apologies. I should watch my words. Silk Destroying King, please don't mind me..."</p>
+        Silk Destroying King smiled, "Little Fatty..."<p>"..."</p>
+        <p>A sudden silence descended while Zhu Tiandao's face twitched. Silk Destroying King cleared his throat awkwardly. That was a mistake. This was a formal setting, not a private setting where he could call Zhu Tiandao whatever he wanted.</p>
+        <p>This was a prefect. It was improper to call him that in a formal setting.</p>
+        <p>Realizing his mistake, Silk Destroying King moved on with the topic and said, "So Su Yu has learned the Time technique. How interesting. So be it. I'll give him a book with my own understanding over the years. I hope it won't go to waste in his hands." </p>
+        <p>He then tossed a notebook out.</p>
+    </div>
+    """,
+    "expected_output": {
+        "chapter_title": "Chapter Y: Little Fatty",
+        "paragraphs": [
+            'Zhu Tiandao smiled and said, "Half a student is still a student, right? Of course, Silk Destroying King is definitely uninterested in formally acknowledging this student. It\'s fine. Su Yu is quite an arrogant kid as well. He might not be willing-cough, cough. My apologies. I should watch my words. Silk Destroying King, please don\'t mind me..."',
+            'Silk Destroying King smiled, "Little Fatty..."',
+            '"..."',
+            "A sudden silence descended while Zhu Tiandao's face twitched. Silk Destroying King cleared his throat awkwardly. That was a mistake. This was a formal setting, not a private setting where he could call Zhu Tiandao whatever he wanted.",
+            "This was a prefect. It was improper to call him that in a formal setting.",
+            'Realizing his mistake, Silk Destroying King moved on with the topic and said, "So Su Yu has learned the Time technique. How interesting. So be it. I\'ll give him a book with my own understanding over the years. I hope it won\'t go to waste in his hands."',
+            "He then tossed a notebook out."
+        ]
+    }
+}
+
 def run_test_case(test_name: str, test_data: dict):
     """Run a single test case and compare the output."""
     print(f"\n=== Running {test_name} ===")
@@ -127,7 +179,9 @@ def run_all_tests():
     test_cases = [
         ("Test Case 1 - Basic paragraphs", test_data1),
         ("Test Case 2 - Mixed content with loose text", test_data2),
-        ("Test Case 3 - Paragraphs with emphasized text", test_data3)
+        ("Test Case 3 - Paragraphs with emphasized text", test_data3),
+        ("Test Case 4 - Complex dialogue with loose text", test_data4),
+        ("Test Case 5 - Little Fatty dialogue mixed content", test_data5)
     ]
     
     passed = 0

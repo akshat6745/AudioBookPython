@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from typing import List, Optional
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag, NavigableString, Comment
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
 import aiohttp
@@ -16,6 +16,8 @@ session = None  # This will be set by the main app
 
 from app.models.schemas import NovelInfo
 from app.core.db import db
+from firebase_admin import firestore
+
 
 novels_collection = db.collection("novels")
 
@@ -43,44 +45,53 @@ def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -
     )
     
     if content_div:
-        paragraphs = []
-        
-        # Strategy: Parse the HTML more carefully to handle mixed content
         # Remove the title element first to avoid including it
         title_elem = content_div.find('h1')
         if title_elem:
             title_elem.decompose()
+
+        paragraphs = []
         
-        # Method 1: Try to get paragraphs from <p> tags
-        p_elements = content_div.find_all('p')
-        p_texts = []
-        for p in p_elements:
-            text = p.get_text().strip()
-            if text:
-                p_texts.append(text)
-        
-        # Method 2: Get all remaining text content after removing <p> tags
-        # Clone the content_div to avoid modifying the original
-        content_copy = content_div.__copy__()
-        
-        # Remove all <p> tags from the copy
-        for p in content_copy.find_all('p'):
-            p.decompose()
-        
-        # Get remaining text content
-        remaining_text = content_copy.get_text().strip()
-        remaining_paragraphs = []
-        
-        if remaining_text:
-            # Split by newlines and clean up
-            lines = remaining_text.split('\n')
-            for line in lines:
-                line = line.strip()
-                if line and len(line) > 10:  # Only substantial content
-                    remaining_paragraphs.append(line)
-        
-        # Combine both methods
-        paragraphs = p_texts + remaining_paragraphs
+        # Helper to classify tags
+        BLOCK_TAGS = {'p', 'div', 'section', 'article', 'aside', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'pre', 'hr', 'table', 'form'}
+
+        def extract_content(element):
+            collected_paragraphs = []
+            current_buffer = []
+
+            def flush_buffer():
+                if current_buffer:
+                    text = "".join(current_buffer).strip()
+                    if text and len(text) > 1:
+                        collected_paragraphs.append(text)
+                    current_buffer.clear()
+
+            for child in element.children:
+                if isinstance(child, Comment):
+                    continue
+                if isinstance(child, NavigableString):
+                    text = str(child)
+                    if text.strip():
+                        current_buffer.append(text)
+                elif isinstance(child, Tag):
+                    if child.name == 'br':
+                        flush_buffer()
+                    elif child.name == 'p':
+                        flush_buffer()
+                        text = child.get_text().strip()
+                        if text:
+                            collected_paragraphs.append(text)
+                    elif child.name in BLOCK_TAGS:
+                        flush_buffer()
+                        collected_paragraphs.extend(extract_content(child))
+                    else:
+                        # Inline element (em, strong, span, a, etc.)
+                        current_buffer.append(child.get_text())
+            
+            flush_buffer()
+            return collected_paragraphs
+
+        paragraphs = extract_content(content_div)
         
         # Remove duplicates while preserving order
         seen = set()
@@ -99,6 +110,12 @@ def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -
     # Fallback to main content areas
     main_content = soup.find('main') or soup.find('article') or soup.body
     if main_content:
+        # Fallback also needs to support loose text if possible, but safe to keep simple for now
+        # Or better yet, use the same extract_blocks strategy on the main_content!
+        # But previous logic was specific: find_all('p') and filter.
+        # Let's keep previous fallback logic to minimize regression risk on generic sites
+        # unless we want to standardize.
+        # Existing logic:
         paragraphs = [p.text.strip() for p in main_content.find_all('p') if p.text.strip()]
         # Filter out unwanted paragraphs
         paragraphs = [p for p in paragraphs if not p.startswith("If you find any errors") and not p.startswith("Search the NovelFire.net")]
@@ -157,11 +174,13 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
             # Novel exists in Firestore, fetch its chapters
             chapters_collection = novel_doc.reference.collection("chapters")
             # Calculate pagination
-            start = (page - 1) * 50
-            end = start + 50
+            start = (page - 1) * 100
+            end = start + 100
             
-            # Query chapters in order
-            chapters_query = chapters_collection.order_by("chapterNumber").offset(start).limit(50)
+            # Query chapters in order (descending - latest first)
+            chapters_query = chapters_collection.order_by(
+                "chapterNumber", direction=firestore.Query.DESCENDING
+            ).offset(start).limit(100)
             chapters = []
             
             for chapter_doc in chapters_query.stream():
@@ -176,7 +195,7 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
             # Get total chapter count from the novel document
             novel_data = novel_doc.to_dict()
             total_chapters = novel_data.get("chapterCount", 0)
-            total_pages = (total_chapters + 49) // 50  # Round up division
+            total_pages = (total_chapters + 99) // 100  # Round up division
             
             return {
                 "chapters": chapters,
@@ -189,59 +208,111 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
         try:
             # 1. Get the chapters page to find the post_id
             chapters_url = f"https://novelfire.net/book/{novel_name}/chapters"
-            async with session.get(chapters_url, headers=get_headers(), ssl=False) as response:
+            timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout
+            async with session.get(chapters_url, headers=get_headers(), ssl=False, timeout=timeout) as response:
                 response.raise_for_status()
                 html = await response.text()
             
             # 2. Extract post_id
             match = re.search(r'post_id=(\d+)', html)
             if not match:
-                raise HTTPException(status_code=500, detail="Could not find novel ID (post_id) for external fetch")
-            
+                raise HTTPException(status_code=404, detail=f"Novel '{novel_name}' not found - could not extract novel ID")
+
             post_id = match.group(1)
             
             # 3. Call the AJAX endpoint
-            # Calculate pagination params
-            start = (page - 1) * 50
-            length = 50
+            # Define helper for parallel requests
+            async def fetch_ajax(url: str):
+                async with session.get(url, headers=get_headers(), ssl=False, timeout=timeout) as response:
+                    response.raise_for_status()
+                    return await response.json()
+
+            # URL 1: Latest Chapter (Limit 1, Descending)
+            latest_url = (
+                f"https://novelfire.net/listChapterDataAjax?post_id={post_id}&draw=1&start=0&length=1"
+                "&order[0][column]=0&order[0][dir]=desc"
+                "&columns[0][data]=n_sort&columns[0][name]=n_sort"
+                "&columns[0][searchable]=true&columns[0][orderable]=true"
+            )
+
+            # URL 2: Current Page (Limit 100, Ascending)
+            # Calculate pagination for page
+            start = (page - 1) * 100
+            length = 100
+            page_url = (
+                f"https://novelfire.net/listChapterDataAjax?post_id={post_id}&draw=1&start={start}&length={length}"
+                "&order[0][column]=0&order[0][dir]=asc"
+                "&columns[0][data]=n_sort&columns[0][name]=n_sort"
+                "&columns[0][searchable]=true&columns[0][orderable]=true"
+            )
             
-            ajax_url = f"https://novelfire.net/listChapterDataAjax?post_id={post_id}&draw=1&start={start}&length={length}"
-            
-            async with session.get(ajax_url, headers=get_headers(), ssl=False) as ajax_response:
-                ajax_response.raise_for_status()
-                data = await ajax_response.json()
+            # Execute in parallel
+            latest_data, page_data = await asyncio.gather(
+                fetch_ajax(latest_url),
+                fetch_ajax(page_url)
+            )
+
+            final_chapters = []
+            seen_links = set()
+
+            # Process Latest Chapter
+            # Note: The result is a list in 'data'
+            for item in latest_data.get('data', []):
+                chapter_number = item.get('n_sort')
+                chapter_title = item.get('title')
+                slug = item.get('slug')
+                chapter_link = f"https://novelfire.net/book/{novel_name}/{slug}"
                 
-                # 4. Parse response
-                chapters = []
-                for item in data.get('data', []):
-                    # Item format: {'n_sort': 1, 'slug': 'chapter-1-...', 'title': 'Chapter 1: ...', ...}
-                    chapter_number = item.get('n_sort')
-                    chapter_title = item.get('title')
-                    slug = item.get('slug')
-                    
-                    # Ensure full link
-                    chapter_link = f"https://novelfire.net/book/{novel_name}/{slug}"
-                    
-                    chapters.append({
+                if chapter_link not in seen_links:
+                    final_chapters.append({
                         "chapterNumber": int(chapter_number) if chapter_number else None,
                         "chapterTitle": chapter_title,
                         "link": chapter_link
                     })
-                    
-                # 5. Calculate totals
-                total_records = int(data.get('recordsTotal', 0))
-                total_pages = (total_records + 49) // 50
-                
-                if not chapters and page > 1 and page <= total_pages:
-                     # If we got no chapters but page seems valid, something might be wrong, but let's return empty
-                     pass
-                     
-                return {
-                    "chapters": chapters,
-                    "total_pages": total_pages,
-                    "current_page": page
-                }
+                    seen_links.add(chapter_link)
 
+            # Process Page Chapters
+            page_chapters_list = []
+            for item in page_data.get('data', []):
+                chapter_number = item.get('n_sort')
+                chapter_title = item.get('title')
+                slug = item.get('slug')
+                chapter_link = f"https://novelfire.net/book/{novel_name}/{slug}"
+                
+                page_chapters_list.append({
+                    "chapterNumber": int(chapter_number) if chapter_number else None,
+                    "chapterTitle": chapter_title,
+                    "link": chapter_link
+                })
+            
+            # Explicitly sort page chapters ASCENDING as a safeguard
+            page_chapters_list.sort(key=lambda x: (x["chapterNumber"] or 0))
+
+            # Add to final list (avoiding duplicates if latest is in the page)
+            for ch in page_chapters_list:
+                if ch["link"] not in seen_links:
+                    final_chapters.append(ch)
+                    seen_links.add(ch["link"])
+                    
+            # 5. Calculate totals
+            total_records = int(page_data.get('recordsTotal', 0))
+            total_pages = (total_records + 99) // 100
+
+            if not final_chapters and page > 1 and page <= total_pages:
+                  pass
+
+            return {
+                "chapters": final_chapters,
+                "total_pages": total_pages,
+                "current_page": page
+            }
+
+        except aiohttp.ClientTimeout:
+            raise HTTPException(status_code=504, detail=f"Timeout while fetching chapters for novel '{novel_name}' from external source")
+        except aiohttp.ClientError as e:
+            raise HTTPException(status_code=502, detail=f"Network error while fetching chapters for novel '{novel_name}': {str(e)}")
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions as-is
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Error fetching chapters from external source: {str(e)}")
     except Exception as e:
