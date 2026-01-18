@@ -3,10 +3,14 @@ from typing import List, Optional
 
 class NovelInfo(BaseModel):
     id: Optional[str] = None
+    slug: Optional[str] = None
     title: str
     author: Optional[str] = None
     chapterCount: Optional[int] = None
     source: str
+    status: Optional[str] = None
+    genres: Optional[List[str]] = None
+    description: Optional[str] = None
     hasImages: Optional[bool] = False
     imageCount: Optional[int] = 0
 

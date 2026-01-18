@@ -3,14 +3,17 @@ from typing import List, Optional
 from bs4 import BeautifulSoup, Tag, NavigableString, Comment
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
+from app.core.supabase_client import get_supabase_client
 import aiohttp
 import re
 from fastapi.responses import StreamingResponse
 from app.api.tts import generate_audio, text_to_speech_dual_voice
 import io
 import asyncio
+import structlog
 
 router = APIRouter()
+logger = structlog.get_logger()
 
 session = None  # This will be set by the main app
 
@@ -129,44 +132,89 @@ def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -
 
 @router.get("/novels", response_model=List[NovelInfo])
 async def fetch_names():
+    """Fetch novels from Supabase only - optimized for speed."""
     try:
-        # Fetch novels from Google Doc
-        url = f"https://docs.google.com/document/d/{DOC_ID}/export?format=txt"
-        async with session.get(url, headers=get_headers()) as response:
-            response.raise_for_status()
-            text = await response.text()
-        doc_novels = [NovelInfo(
-            id=None,
-            title=line.strip(),
-            author=None,
-            chapterCount=None,
-            source="google_doc"
-        ) for line in text.split('\n') if line.strip()]
+        supabase = get_supabase_client()
+        # Simple query to novels table only - no joins
+        result = supabase.table('novels').select(
+            'id, slug, title, author, genres, status, description'
+        ).order('updated_at', desc=True).execute()
         
-        # Fetch novels from Firestore
-        db_novels = []
-        for doc in novels_collection.stream():
-            data = doc.to_dict()
-            db_novels.append(NovelInfo(
-                id=doc.id,
-                title=data.get("title"),
-                author=data.get("author"),
-                chapterCount=data.get("chapterCount"),
-                source="epub_upload",
-                hasImages=data.get("hasImages", False),
-                imageCount=data.get("imageCount", 0)
-            ))
+        novels = [
+            NovelInfo(
+                id=str(row['id']),
+                slug=row['slug'],
+                title=row['title'],
+                author=row.get('author'),
+                chapterCount=None,  # Not fetching chapter count for speed
+                source="supabase",
+                status=row.get('status'),
+                genres=row.get('genres'),
+                description=row.get('description')
+            )
+            for row in result.data
+        ]
         
-        # Combine both sources
-        return doc_novels + db_novels
+        logger.info("Fetched novels from Supabase", count=len(novels))
+        return novels
             
     except Exception as e:
+        logger.error("Error fetching novels from Supabase", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error fetching novels: {str(e)}")
 
 @router.get("/chapters-with-pages/{novel_name}")
 async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
+    """Fetch paginated chapters for a novel from Supabase or Firebase."""
     try:
-        # First try to find the novel in Firestore
+        # 1. First try Supabase (novel_name is the slug)
+        try:
+            supabase = get_supabase_client()
+            
+            # Get the novel by slug
+            novel_result = supabase.table('novels').select('id').eq('slug', novel_name).single().execute()
+            
+            if novel_result.data:
+                novel_id = novel_result.data['id']
+                
+                # Calculate pagination (100 chapters per page, ascending order - chapter 1 first)
+                start = (page - 1) * 100
+                end = start + 99  # Supabase range is inclusive
+                
+                # Get chapters with pagination
+                chapters_result = supabase.table('chapters').select(
+                    'id, chapter_number, chapter_title, word_count'
+                ).eq('novel_id', novel_id).order(
+                    'chapter_number', desc=False
+                ).range(start, end).execute()
+                
+                # Get total chapter count
+                total_result = supabase.table('chapters').select(
+                    'id', count='exact'
+                ).eq('novel_id', novel_id).execute()
+                
+                total_chapters = total_result.count if total_result.count else 0
+                total_pages = (total_chapters + 99) // 100
+                
+                chapters = []
+                for ch in chapters_result.data:
+                    chapters.append({
+                        "chapterNumber": ch['chapter_number'],
+                        "chapterTitle": ch['chapter_title'],
+                        "id": str(ch['id']),
+                        "wordCount": ch.get('word_count')
+                    })
+                
+                logger.info("Fetched chapters from Supabase", novel=novel_name, count=len(chapters))
+                return {
+                    "chapters": chapters,
+                    "total_pages": total_pages,
+                    "current_page": page
+                }
+        except Exception as e:
+            # Log but continue to try Firebase
+            logger.debug("Novel not found in Supabase, trying Firebase", novel=novel_name, error=str(e))
+        
+        # 2. Try Firebase (for EPUB uploads - novel_name is the title)
         novels = novels_collection.where("title", "==", novel_name).stream()
         novel_doc = next(novels, None)
         
@@ -175,11 +223,10 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
             chapters_collection = novel_doc.reference.collection("chapters")
             # Calculate pagination
             start = (page - 1) * 100
-            end = start + 100
             
-            # Query chapters in order (descending - latest first)
+            # Query chapters in order (ascending - chapter 1 first)
             chapters_query = chapters_collection.order_by(
-                "chapterNumber", direction=firestore.Query.DESCENDING
+                "chapterNumber", direction=firestore.Query.ASCENDING
             ).offset(start).limit(100)
             chapters = []
             
@@ -203,125 +250,49 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
                 "current_page": page
             }
         
-        # If not found in Firestore, try fetching from novelfire
-        # New approach: Use their internal AJAX API
-        try:
-            # 1. Get the chapters page to find the post_id
-            chapters_url = f"https://novelfire.net/book/{novel_name}/chapters"
-            timeout = aiohttp.ClientTimeout(total=30)  # 30 second timeout
-            async with session.get(chapters_url, headers=get_headers(), ssl=False, timeout=timeout) as response:
-                response.raise_for_status()
-                html = await response.text()
-            
-            # 2. Extract post_id
-            match = re.search(r'post_id=(\d+)', html)
-            if not match:
-                raise HTTPException(status_code=404, detail=f"Novel '{novel_name}' not found - could not extract novel ID")
-
-            post_id = match.group(1)
-            
-            # 3. Call the AJAX endpoint
-            # Define helper for parallel requests
-            async def fetch_ajax(url: str):
-                async with session.get(url, headers=get_headers(), ssl=False, timeout=timeout) as response:
-                    response.raise_for_status()
-                    return await response.json()
-
-            # URL 1: Latest Chapter (Limit 1, Descending)
-            latest_url = (
-                f"https://novelfire.net/listChapterDataAjax?post_id={post_id}&draw=1&start=0&length=1"
-                "&order[0][column]=0&order[0][dir]=desc"
-                "&columns[0][data]=n_sort&columns[0][name]=n_sort"
-                "&columns[0][searchable]=true&columns[0][orderable]=true"
-            )
-
-            # URL 2: Current Page (Limit 100, Ascending)
-            # Calculate pagination for page
-            start = (page - 1) * 100
-            length = 100
-            page_url = (
-                f"https://novelfire.net/listChapterDataAjax?post_id={post_id}&draw=1&start={start}&length={length}"
-                "&order[0][column]=0&order[0][dir]=asc"
-                "&columns[0][data]=n_sort&columns[0][name]=n_sort"
-                "&columns[0][searchable]=true&columns[0][orderable]=true"
-            )
-            
-            # Execute in parallel
-            latest_data, page_data = await asyncio.gather(
-                fetch_ajax(latest_url),
-                fetch_ajax(page_url)
-            )
-
-            final_chapters = []
-            seen_links = set()
-
-            # Process Latest Chapter
-            # Note: The result is a list in 'data'
-            for item in latest_data.get('data', []):
-                chapter_number = item.get('n_sort')
-                chapter_title = item.get('title')
-                slug = item.get('slug')
-                chapter_link = f"https://novelfire.net/book/{novel_name}/{slug}"
-                
-                if chapter_link not in seen_links:
-                    final_chapters.append({
-                        "chapterNumber": int(chapter_number) if chapter_number else None,
-                        "chapterTitle": chapter_title,
-                        "link": chapter_link
-                    })
-                    seen_links.add(chapter_link)
-
-            # Process Page Chapters
-            page_chapters_list = []
-            for item in page_data.get('data', []):
-                chapter_number = item.get('n_sort')
-                chapter_title = item.get('title')
-                slug = item.get('slug')
-                chapter_link = f"https://novelfire.net/book/{novel_name}/{slug}"
-                
-                page_chapters_list.append({
-                    "chapterNumber": int(chapter_number) if chapter_number else None,
-                    "chapterTitle": chapter_title,
-                    "link": chapter_link
-                })
-            
-            # Explicitly sort page chapters ASCENDING as a safeguard
-            page_chapters_list.sort(key=lambda x: (x["chapterNumber"] or 0))
-
-            # Add to final list (avoiding duplicates if latest is in the page)
-            for ch in page_chapters_list:
-                if ch["link"] not in seen_links:
-                    final_chapters.append(ch)
-                    seen_links.add(ch["link"])
-                    
-            # 5. Calculate totals
-            total_records = int(page_data.get('recordsTotal', 0))
-            total_pages = (total_records + 99) // 100
-
-            if not final_chapters and page > 1 and page <= total_pages:
-                  pass
-
-            return {
-                "chapters": final_chapters,
-                "total_pages": total_pages,
-                "current_page": page
-            }
-
-        except aiohttp.ClientTimeout:
-            raise HTTPException(status_code=504, detail=f"Timeout while fetching chapters for novel '{novel_name}' from external source")
-        except aiohttp.ClientError as e:
-            raise HTTPException(status_code=502, detail=f"Network error while fetching chapters for novel '{novel_name}': {str(e)}")
-        except HTTPException:
-            raise  # Re-raise HTTP exceptions as-is
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching chapters from external source: {str(e)}")
+        # Novel not found in either source
+        raise HTTPException(status_code=404, detail=f"Novel '{novel_name}' not found")
+        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chapters: {str(e)}")
 
 @router.get("/chapter")
 async def fetch_chapter(chapterNumber: int, novelName: str):
+    """Fetch a single chapter's content from Supabase or Firebase."""
     try:
-        # First try to find the novel in Firestore
+        # 1. First try Supabase (novelName is the slug)
+        try:
+            supabase = get_supabase_client()
+            
+            # Get the novel by slug
+            novel_result = supabase.table('novels').select('id').eq('slug', novelName).single().execute()
+            
+            if novel_result.data:
+                novel_id = novel_result.data['id']
+                
+                # Get the chapter
+                chapter_result = supabase.table('chapters').select(
+                    'chapter_number, chapter_title, content, word_count'
+                ).eq('novel_id', novel_id).eq('chapter_number', chapterNumber).single().execute()
+                
+                if chapter_result.data:
+                    ch = chapter_result.data
+                    # Content is already a TEXT[] array in Supabase - no parsing needed!
+                    content = ch['content'] if ch['content'] else []
+                    
+                    logger.info("Fetched chapter from Supabase", novel=novelName, chapter=chapterNumber)
+                    return {
+                        "chapterNumber": ch['chapter_number'],
+                        "chapterTitle": ch['chapter_title'],
+                        "content": content
+                    }
+        except Exception as e:
+            # Log but continue to try Firebase
+            logger.debug("Chapter not found in Supabase, trying Firebase", novel=novelName, chapter=chapterNumber, error=str(e))
+        
+        # 2. Try Firebase (for EPUB uploads - novelName is the title)
         novels = novels_collection.where("title", "==", novelName).stream()
         novel_doc = next(novels, None)
         
@@ -337,23 +308,11 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
                     "content": chapter_data.get("content", [])
                 }
         
-        # If not found in Firestore, fetch from novelfire
-        link = f"https://novelfire.net/book/{novelName}/chapter-{chapterNumber}"
-        async with session.get(link, headers=get_headers(), ssl=False) as response:
-            response.raise_for_status()
-            html = await response.text()
-            
-        soup = BeautifulSoup(html, 'html.parser')
-        chapter_title = soup.find('h1') or soup.find('title')
-        chapter_title_text = chapter_title.text.strip() if chapter_title else "Unknown Title"
+        # Chapter not found in either source
+        raise HTTPException(status_code=404, detail=f"Chapter {chapterNumber} not found for novel '{novelName}'")
         
-        # Use the new extract_paragraphs_from_soup function
-        result = extract_paragraphs_from_soup(soup, chapter_title_text)
-        return {
-            "chapterNumber": chapterNumber,
-            "chapterTitle": result["chapterTitle"],
-            "content": result["content"]
-        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}")
 

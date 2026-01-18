@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     # External Services
     SHEET_ID: Optional[str] = None
     
+    # Supabase
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_KEY: Optional[str] = None
+    
     # Firebase
     FIREBASE_CREDENTIALS: Optional[str] = None
     
