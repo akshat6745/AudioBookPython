@@ -12,6 +12,9 @@ def parse_epub_content(epub_content: bytes) -> Tuple[Novel, List[Dict], List[Dic
     """
     Parse an EPUB file and extract its content including images.
     Returns a tuple of (Novel object, List of chapter dictionaries for Firestore, List of image dictionaries)
+    
+    This parser splits content by h2 headings within each HTML file to handle
+    EPUBs where multiple chapters/sections are combined in single files.
     """
     # Save the content for debugging
     with open("/tmp/debug_epub.epub", "wb") as f:
@@ -35,86 +38,95 @@ def parse_epub_content(epub_content: bytes) -> Tuple[Novel, List[Dict], List[Dic
     # Sort items by file name to maintain order
     items = sorted(book.get_items_of_type(ebooklib.ITEM_DOCUMENT), key=lambda x: x.file_name)
     
-    # First pass: identify real chapters and their order
-    chapters_data = []
     for item in items:
         if not is_chapter_content(item.file_name, item.content):
             continue
             
-        # Parse HTML content
-        soup = BeautifulSoup(item.content, 'html.parser')
-        chapter_title = extract_chapter_title(soup)
-        
-        # Try to extract chapter number from title or content
-        chapter_num_match = re.search(r'Chapter\s+(\d+)', chapter_title, re.IGNORECASE)
-        if chapter_num_match:
-            num = int(chapter_num_match.group(1))
-        else:
-            # If not found in title, check the content directly
-            soup_temp = BeautifulSoup(item.content, 'html.parser')
-            content_text = soup_temp.get_text()[:300]  # Check first 300 chars
-            content_match = re.search(r'Chapter\s+(\d+)', content_text, re.IGNORECASE)
-            if content_match:
-                num = int(content_match.group(1))
-            else:
-                # Special handling for prologue (assign as chapter 0)
-                if 'prologue' in chapter_title.lower():
-                    num = 0
-                else:
-                    num = None
-            
-        chapters_data.append({
-            'item': item,
-            'title': chapter_title,
-            'extracted_num': num,
-            'filename': item.file_name
-        })
-    
-    # Sort chapters by their extracted number, then by filename
-    # Handle prologue (num=0) and None values properly
-    def sort_key(x):
-        num = x['extracted_num']
-        if num is None:
-            return (float('inf'), x['filename'])
-        return (num, x['filename'])
-    
-    chapters_data.sort(key=sort_key)
-    
-    # Second pass: process chapters in correct order
-    for idx, chapter_data in enumerate(chapters_data, 1):
-        item = chapter_data['item']
         soup = BeautifulSoup(item.content, 'html.parser')
         
-        # Remove unwanted tags and their content
-        for tag in soup(['script', 'style']):
+        # Remove unwanted tags
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
             tag.decompose()
         
-        # Extract chapter title
-        chapter_title = extract_chapter_title(soup) or f"Chapter {chapter_number}"
+        # Find all h2 headings - each represents a separate chapter/section
+        h2_tags = soup.find_all('h2')
         
-        # Extract and clean chapter content, including image references
-        content, chapter_images = extract_chapter_content_with_images(soup, images)
-        if not content:  # Skip empty chapters
-            continue
+        if h2_tags:
+            # Split by h2 headings
+            for i, h2 in enumerate(h2_tags):
+                chapter_title = h2.get_text().strip()
+                
+                if not chapter_title:
+                    continue
+                
+                # Extract content between this h2 and the next h2 (or end of file)
+                content = []
+                current = h2.find_next_sibling()
+                
+                while current:
+                    if current.name == 'h2':
+                        break  # Stop at next h2
+                    
+                    # Extract text from paragraphs and other text elements
+                    if current.name == 'p':
+                        text = current.get_text().strip()
+                        if text and len(text) > 10:
+                            text = re.sub(r'\s+', ' ', text)
+                            content.append(text)
+                    elif current.name in ['div', 'blockquote', 'section']:
+                        # Handle nested content
+                        for p in current.find_all('p'):
+                            text = p.get_text().strip()
+                            if text and len(text) > 10:
+                                text = re.sub(r'\s+', ' ', text)
+                                content.append(text)
+                    
+                    current = current.find_next_sibling()
+                
+                if not content:
+                    continue
+                
+                # Create chapter objects
+                chapter = Chapter(
+                    number=chapter_number,
+                    title=chapter_title,
+                    content=content
+                )
+                
+                firestore_chapter = {
+                    "chapterNumber": chapter_number,
+                    "chapterTitle": chapter_title,
+                    "content": content,
+                    "images": []
+                }
+                
+                chapters.append(chapter)
+                firestore_chapters.append(firestore_chapter)
+                chapter_number += 1
+        else:
+            # No h2 tags - treat the entire file as one chapter (fallback)
+            chapter_title = extract_chapter_title(soup) or f"Chapter {chapter_number}"
+            content, chapter_images = extract_chapter_content_with_images(soup, images)
             
-        # Create chapter objects
-        chapter = Chapter(
-            number=chapter_number,
-            title=chapter_title,
-            content=content
-        )
-        
-        # Create Firestore chapter document
-        firestore_chapter = {
-            "chapterNumber": chapter_number,
-            "chapterTitle": chapter_title,
-            "content": content,
-            "images": chapter_images  # Add image references to chapter
-        }
-        
-        chapters.append(chapter)
-        firestore_chapters.append(firestore_chapter)
-        chapter_number += 1
+            if not content:
+                continue
+            
+            chapter = Chapter(
+                number=chapter_number,
+                title=chapter_title,
+                content=content
+            )
+            
+            firestore_chapter = {
+                "chapterNumber": chapter_number,
+                "chapterTitle": chapter_title,
+                "content": content,
+                "images": chapter_images
+            }
+            
+            chapters.append(chapter)
+            firestore_chapters.append(firestore_chapter)
+            chapter_number += 1
     
     novel = Novel(
         title=title,
@@ -123,6 +135,7 @@ def parse_epub_content(epub_content: bytes) -> Tuple[Novel, List[Dict], List[Dic
     )
     
     return novel, firestore_chapters, images
+
 
 def extract_images_from_epub(book) -> List[Dict]:
     """
@@ -186,8 +199,17 @@ def is_chapter_content(file_name: str, content: bytes) -> bool:
         first_300_chars = text_content.lower()[:300]
         
         # Strong exclusions (high confidence)
-        if text_content.lower().count('chapter') > 12:  # Likely TOC
-            return False
+        # Use ratio-based TOC detection instead of absolute count
+        # TOC pages have many "Chapter" mentions but short content overall
+        # A real chapter with 20,000+ words that mentions "chapter" 50 times is NOT a TOC
+        # A TOC with 500 words and 50 "chapter" mentions IS a TOC
+        chapter_count = text_content.lower().count('chapter')
+        words = len(text_content.split())
+        if words > 0 and chapter_count > 12:
+            chapter_density = chapter_count / words
+            # If more than 1 "chapter" per 50 words on average, likely TOC
+            if chapter_density > 0.02:
+                return False
         if 'contents' in text_content.lower()[:200] and 'prologue' in text_content.lower()[:200]:
             return False
         if any(word in text_content.lower()[:200] for word in ['glossary', 'about the author', 'acknowledgments']):
@@ -202,7 +224,8 @@ def is_chapter_content(file_name: str, content: bytes) -> bool:
             return False
         
         # Strong positive indicators (high confidence)
-        has_chapter_number = bool(re.search(r'chapter\s+\d+', first_300_chars))
+        # Use \s* instead of \s+ to handle text-runs like "chapter1title" from p-tag extraction
+        has_chapter_number = bool(re.search(r'chapter\s*\d+', first_300_chars))
         has_prologue = 'prologue' in first_300_chars
         has_epilogue = 'epilogue' in first_300_chars
         
@@ -216,9 +239,9 @@ def is_chapter_content(file_name: str, content: bytes) -> bool:
         
         # Broader chapter patterns for different formats
         extended_patterns = [
-            r'chapter\s+[ivxlc]+',  # Roman numerals
+            r'chapter\s*[ivxlc]+',  # Roman numerals
             r'ch\.\s*\d+',          # Abbreviated
-            r'part\s+\d+',          # Parts
+            r'part\s*\d+',          # Parts
             r'interlude',           # Interludes
         ]
         
@@ -253,27 +276,54 @@ def is_chapter_content(file_name: str, content: bytes) -> bool:
 def extract_chapter_title(soup: BeautifulSoup) -> str:
     """
     Extract chapter title from the HTML content.
-    More robust to handle different EPUB formatting styles.
+    More robust to handle different EPUB formatting styles including:
+    - Standard headings (h1, h2, h3)
+    - Multi-paragraph chapter headers (<p>CHAPTER</p><p>21</p><p>Title</p>)
+    - Single paragraph titles
     """
-    # Get all text content to work with
-    text_content = soup.get_text().strip()
-    
-    # Try common heading tags first - but be more flexible
+    # First, try common heading tags
     for tag in ['h1', 'h2', 'h3', 'h4']:
         heading = soup.find(tag)
         if heading:
             title = heading.get_text().strip()
-            # Clean up and validate the title
             if len(title) > 2 and title.lower() not in ['chapter', 'the', 'a', 'an']:
-                # Clean up common artifacts
                 title = re.sub(r'^Chapter\s*(\d+)\s*[-:]\s*', r'Chapter \1: ', title, flags=re.IGNORECASE)
                 title = re.sub(r'^Chapter\s*(\d+)\s*$', r'Chapter \1', title, flags=re.IGNORECASE)
-                return title
+                return title[:200]  # Limit length
+    
+    # Try paragraph-based extraction for EPUBs like Eye of the World
+    # Format: <p>CHAPTER</p><p>21</p><p>Listen to the Wind</p>
+    paragraphs = soup.find_all('p')[:10]  # Check first 10 paragraphs
+    para_texts = [p.get_text().strip() for p in paragraphs if p.get_text().strip()]
+    
+    if para_texts:
+        # Look for CHAPTER, PROLOGUE, or EPILOGUE in first few paragraphs
+        for i, text in enumerate(para_texts[:5]):
+            text_upper = text.upper()
+            if text_upper in ['CHAPTER', 'PROLOGUE', 'EPILOGUE', 'PART', 'INTERLUDE']:
+                title_parts = [text]
+                # Collect following short parts (number and title)
+                for j in range(i + 1, min(i + 4, len(para_texts))):
+                    next_text = para_texts[j]
+                    if len(next_text) > 100:  # Too long, this is content not title
+                        break
+                    # Skip book title noise
+                    if any(skip in next_text.lower() for skip in ['wheel of time', 'book 1', 'book 2']):
+                        continue
+                    title_parts.append(next_text)
+                    # If we got a chapter number + title, stop
+                    if len(title_parts) >= 3:
+                        break
+                return ' '.join(title_parts)[:200]
             
-    # Look for chapter patterns in the beginning of the text content
+            # Check for "CHAPTER 1" or "Chapter 1: Title" format in single paragraph
+            if re.match(r'^(chapter|prologue|epilogue)\s+\d*', text, re.IGNORECASE):
+                return text[:200]
+    
+    # Fallback to text-line based extraction
+    text_content = soup.get_text().strip()
     lines = [line.strip() for line in text_content.split('\n') if line.strip()]
     
-    # Multiple strategies for finding chapter titles
     strategies = [
         extract_multiline_chapter_title,
         extract_single_line_chapter_title,
@@ -284,15 +334,16 @@ def extract_chapter_title(soup: BeautifulSoup) -> str:
     for strategy in strategies:
         title = strategy(lines)
         if title:
-            return title
+            return title[:200]  # Limit length
     
     # Final fallback: try finding chapter headings in paragraphs
     for p in soup.find_all('p'):
         text = p.get_text().strip()
         if re.match(r'^(chapter|prologue|epilogue|part|interlude)\s+', text, re.IGNORECASE):
-            return text[:100]  # Limit length
+            return text[:200]
             
     return ""
+
 
 def extract_multiline_chapter_title(lines: list) -> str:
     """Extract title from multi-line chapter headers"""
