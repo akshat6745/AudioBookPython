@@ -3,9 +3,7 @@ services:
     name: audiobook-python
     env: docker
     plan: free
-    region: ohio
-    buildCommand: docker build -t audiobook-python .
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 2 --timeout 120 app.main:app
+    region: singapore
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
