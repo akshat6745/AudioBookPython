@@ -1,0 +1,61 @@
+DETAILED COMPARISON RESULTS
+================================================================================
+
+TOC-BASED PARSER CHAPTERS:
+--------------------------------------------------------------------------------
+1. Contents
+2. Title Page
+3. Dedication
+4. Copyright
+5. Chapter 1
+6. Chapter 2
+7. Chapter 3
+8. Chapter 4
+9. Chapter 5
+10. Chapter 6
+11. Chapter 7
+12. Chapter 8
+13. Chapter 9
+14. Chapter 10
+15. Chapter 11
+16. Chapter 12
+17. Chapter 13
+18. Chapter 14
+19. Chapter 15
+20. Chapter 16
+21. Chapter 17
+22. Chapter 18
+23. Chapter 19
+24. Chapter 20
+25. [Sequel Page]
+
+
+SPINE-BASED PARSER CHAPTERS:
+--------------------------------------------------------------------------------
+1. Contents
+2. Unsouled
+3. Unsouled
+4. Unsouled
+5. Unsouled
+6. Unsouled
+7. Unsouled
+8. Unsouled
+9. Unsouled
+10. Unsouled
+11. Unsouled
+12. Unsouled
+13. Unsouled
+14. Unsouled
+15. Unsouled
+16. Unsouled
+17. Unsouled
+18. Unsouled
+19. Unsouled
+20. Unsouled
+21. Unsouled
+22. Unsouled
+23. Unsouled
+24. Unsouled
+
+
+Content comparisons saved: 10 chapters analyzed

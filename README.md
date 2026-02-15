@@ -8,12 +8,21 @@ This is a Python backend service that provides APIs to:
 
 ## Local Development Setup
 
-1. Install dependencies:
+1. Setup virtual environment:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # On macOS/Linux
+# or
+.venv\Scripts\activate  # On Windows
+```
+
+2. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Create a `.env` file with:
+3. Configure environment variables:
+Create a `.env` file in the root directory (you can copy `.env.example` as a starting point):
 ```
 SHEET_ID=1VRLgR_6cCJeXVh6N3IAiwrlxEmeDbc03CqqSZ_o57so
 ENVIRONMENT=development
@@ -21,7 +30,7 @@ DEBUG=True
 LOG_LEVEL=DEBUG
 ```
 
-3. Run the server:
+4. Start the development server:
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 ```

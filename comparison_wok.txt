@@ -1,0 +1,74 @@
+DETAILED COMPARISON RESULTS
+================================================================================
+
+TOC-BASED PARSER CHAPTERS:
+--------------------------------------------------------------------------------
+1. Title Page
+2. Copyright Notice
+3. Dedication
+4. ACKNOWLEDGMENTS
+5. CONTENTS
+6. Prelude to the Stormlight Archive
+7. Prologue: To Kill
+8. 1: STORMBLESSED
+9. 2: HONOR IS DEAD
+10. 3: CITY OF BELLS
+11. 4: THE SHATTERED PLAINS
+12. 5: HERETIC
+13. 6: BRIDGE FOUR
+14. 7: ANYTHING REASONABLE
+15. 8: NEARER THE FLAME
+16. 9: DAMNATION
+17. 10: STORIES OF SURGEONS
+18. 11: DROPLETS
+19. 1-1: ISHIKK
+20. 1-2: NAN BALAT
+21. 1-3: THE GLORY OF IGNORANCE
+22. 12: UNITY
+23. 13: TEN HEARTBEATS
+24. 14: PAYDAY
+25. 15: THE DECOY
+26. 16: COCOONS
+27. 17: A BLOODY, RED SUNSET
+28. 18: HIGHPRINCE OF WAR
+29. 19: STARFALLS
+30. 20: SCARLET
+... and 65 more
+
+
+SPINE-BASED PARSER CHAPTERS:
+--------------------------------------------------------------------------------
+1. BRANDON SANDERSON
+2. The Way of Kings
+3. The Way of Kings
+4. ACKNOWLEDGMENTS
+5. CONTENTS
+6. ILLUSTRATIONS
+7. PRELUDE TO THE STORMLIGHT ARCHIVE
+8. The Way of Kings
+9. The Way of Kings
+10. The Way of Kings
+11. The Way of Kings
+12. The Way of Kings
+13. The Way of Kings
+14. The Way of Kings
+15. The Way of Kings
+16. The Way of Kings
+17. The Way of Kings
+18. The Way of Kings
+19. The Way of Kings
+20. The Way of Kings
+21. The Way of Kings
+22. The Way of Kings
+23. The Way of Kings
+24. The Way of Kings
+25. The Way of Kings
+26. The Way of Kings
+27. The Way of Kings
+28. The Way of Kings
+29. The Way of Kings
+30. The Way of Kings
+... and 70 more
+
+
+Content comparisons saved: 10 chapters analyzed

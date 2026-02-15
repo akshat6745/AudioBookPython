@@ -15,11 +15,11 @@ class Settings(BaseSettings):
     SHEET_ID: Optional[str] = None
     
     # Supabase
-    SUPABASE_URL: Optional[str] = None
-    SUPABASE_KEY: Optional[str] = None
+    SUPABASE_URL: str
+    SUPABASE_KEY: str
     
-    # Firebase
-    FIREBASE_CREDENTIALS: Optional[str] = None
+    # Upload verification
+    VERIFY_UPLOADS: bool = True # Automatically verify content after upload
     
     @property
     def is_local(self) -> bool:
@@ -28,5 +28,9 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+def get_settings() -> Settings:
+    """Get settings instance."""
+    return settings
 
 settings = Settings()

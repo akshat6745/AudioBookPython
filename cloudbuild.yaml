@@ -19,7 +19,7 @@ steps:
       - --platform=managed
       - --allow-unauthenticated
       - --set-env-vars=ENVIRONMENT=production,LOG_LEVEL=INFO,SHEET_ID=$_SHEET_ID
-      - --update-secrets=FIREBASE_CREDENTIALS=projects/$_PROJECT_ID/secrets/FIREBASE_CREDENTIALS:latest
+      - --update-secrets=SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_KEY=SUPABASE_KEY:latest
 
 substitutions:
   _PROJECT_ID: ${PROJECT_ID}

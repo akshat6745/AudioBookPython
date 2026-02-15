@@ -2,7 +2,6 @@ from fastapi import APIRouter, UploadFile, HTTPException
 from fastapi.responses import Response
 from app.models.schemas import NovelUploadResponse, ImageInfo, NovelImagesResponse
 from app.services.epub_parser import parse_epub_content
-from app.core.db import db
 from app.core.supabase_client import get_supabase_client
 import re
 import base64
@@ -11,58 +10,107 @@ import structlog
 router = APIRouter()
 logger = structlog.get_logger()
 
-# Firebase collection for images only (hybrid approach)
-firebase_novels_collection = db.collection("epub_images")
-
-
 def generate_slug(title: str) -> str:
     """Generate a URL-friendly slug from a title."""
-    # Convert to lowercase
     slug = title.lower()
-    # Replace spaces and special chars with hyphens
     slug = re.sub(r'[^a-z0-9]+', '-', slug)
-    # Remove leading/trailing hyphens
     slug = slug.strip('-')
-    # Limit length
     return slug[:200] if len(slug) > 200 else slug
-
 
 def calculate_word_count(content: list) -> int:
     """Calculate total word count from a list of paragraphs."""
     return sum(len(p.split()) for p in content)
+
+def verify_upload(epub_content: bytes, novel_id: str, supabase, logger) -> bool:
+    """
+    Verify that uploaded content matches database content.
+    Returns True if verification passed, False otherwise.
+    """
+    try:
+        # Re-parse the EPUB
+        novel, parsed_chapters, _ = parse_epub_content(epub_content)
+        
+        # Get chapters from database
+        db_chapters = supabase.table('chapters').select(
+            'chapter_number, chapter_title, content'
+        ).eq('novel_id', novel_id).order('chapter_number').execute()
+        
+        # Quick verification
+        if len(parsed_chapters) != len(db_chapters.data):
+            logger.error(
+                "Verification failed: chapter count mismatch",
+                parsed=len(parsed_chapters),
+                db=len(db_chapters.data),
+                novel_id=novel_id
+            )
+            return False
+        
+        # Verify first, middle, and last chapter content
+        check_indices = [0, len(parsed_chapters) // 2, len(parsed_chapters) - 1]
+        
+        for idx in check_indices:
+            if idx < len(parsed_chapters):
+                parsed_ch = parsed_chapters[idx]
+                db_ch = db_chapters.data[idx]
+                
+                if parsed_ch['chapterTitle'] != db_ch['chapter_title']:
+                    logger.error(
+                        "Verification failed: title mismatch",
+                        chapter=idx+1,
+                        parsed=parsed_ch['chapterTitle'],
+                        db=db_ch['chapter_title'],
+                        novel_id=novel_id
+                    )
+                    return False
+                
+                parsed_content = ' '.join(parsed_ch['content'])
+                db_content = ' '.join(db_ch['content'])
+                
+                if parsed_content != db_content:
+                    logger.error(
+                        "Verification failed: content mismatch",
+                        chapter=idx+1,
+                        parsed_len=len(parsed_content),
+                        db_len=len(db_content),
+                        novel_id=novel_id
+                    )
+                    return False
+        
+        logger.info("Content verification passed", novel_id=novel_id, chapters=len(parsed_chapters))
+        return True
+        
+    except Exception as e:
+        logger.error("Verification error", error=str(e), novel_id=novel_id)
+        return False
 
 
 @router.post("/upload-epub", response_model=NovelUploadResponse)
 async def upload_epub(file: UploadFile):
     """
     Upload and parse an EPUB file.
-    Novel and chapters are stored in Supabase; images remain in Firebase.
+    Novel, chapters, and images are stored in Supabase.
     """
     if not file.filename.endswith('.epub'):
         raise HTTPException(status_code=400, detail="File must be an EPUB file")
     
     try:
-        # Read the EPUB file content
         content = await file.read()
-        
-        # Parse the EPUB content
         novel, chapters, images = parse_epub_content(content)
         
         supabase = get_supabase_client()
         slug = generate_slug(novel.title)
         
-        # Check if novel already exists in Supabase by slug or title
-        existing = supabase.table('novels').select('id, slug').or_(
-            f"slug.eq.{slug},title.eq.{novel.title}"
-        ).execute()
+        # Search for existing novel by slug or exact title
+        # Using separate queries to avoid PostgREST syntax errors with special characters in titles
+        existing = supabase.table('novels').select('id, slug').eq('slug', slug).execute()
+        if not existing.data:
+            existing = supabase.table('novels').select('id, slug').eq('title', novel.title).execute()
         
         if existing.data:
             existing_novel_id = existing.data[0]['id']
-            # Check if chapters exist - if not, this is an orphaned novel from failed upload
             existing_chapters = supabase.table('chapters').select('id').eq('novel_id', existing_novel_id).limit(1).execute()
             
             if existing_chapters.data:
-                # Novel exists with chapters - truly already uploaded
                 return NovelUploadResponse(
                     title=novel.title,
                     author=novel.author,
@@ -70,11 +118,9 @@ async def upload_epub(file: UploadFile):
                     message="Novel already exists in the database"
                 )
             else:
-                # Orphaned novel (0 chapters) - delete and re-insert
                 logger.info("Found orphaned novel with 0 chapters, deleting", novel_id=existing_novel_id)
                 supabase.table('novels').delete().eq('id', existing_novel_id).execute()
         
-        # Ensure unique slug by appending number if needed
         base_slug = slug
         counter = 1
         while True:
@@ -84,7 +130,6 @@ async def upload_epub(file: UploadFile):
             slug = f"{base_slug}-{counter}"
             counter += 1
         
-        # Insert novel into Supabase
         novel_data = {
             "slug": slug,
             "title": novel.title,
@@ -102,7 +147,6 @@ async def upload_epub(file: UploadFile):
         novel_id = novel_result.data[0]['id']
         logger.info("Inserted novel into Supabase", novel_id=novel_id, slug=slug)
         
-        # Insert chapters into Supabase in batches
         chapters_data = []
         for chapter in chapters:
             chapter_content = chapter.get("content", [])
@@ -110,11 +154,10 @@ async def upload_epub(file: UploadFile):
                 "novel_id": novel_id,
                 "chapter_number": chapter["chapterNumber"],
                 "chapter_title": chapter.get("chapterTitle", f"Chapter {chapter['chapterNumber']}"),
-                "content": chapter_content,  # TEXT[] in Supabase
+                "content": chapter_content,
                 "word_count": calculate_word_count(chapter_content),
             })
         
-        # Batch insert chapters in chunks to avoid timeout/size limits
         if chapters_data:
             try:
                 batch_size = 50
@@ -123,30 +166,44 @@ async def upload_epub(file: UploadFile):
                     supabase.table('chapters').insert(batch).execute()
                 logger.info("Inserted chapters into Supabase", count=len(chapters_data))
             except Exception as chapter_error:
-                # If chapter insert fails, delete the novel to avoid orphaned entry
                 logger.error("Failed to insert chapters, rolling back novel", error=str(chapter_error))
                 supabase.table('novels').delete().eq('id', novel_id).execute()
                 raise HTTPException(status_code=500, detail=f"Failed to insert chapters: {str(chapter_error)}")
         
+        # Verify uploaded content if enabled
+        from app.core.settings import get_settings
+        settings = get_settings()
         
-        # Store images in Firebase (hybrid approach - images stay in Firebase)
-        firebase_novel_id = None
+        if settings.VERIFY_UPLOADS:
+            logger.info("Verifying uploaded content", novel_id=novel_id)
+            verification_passed = verify_upload(content, novel_id, supabase, logger)
+            
+            if not verification_passed:
+                logger.warning("Content verification failed - data may be incomplete", novel_id=novel_id)
+                # Don't fail the upload, just log the warning
+        
         if images:
-            novel_ref = firebase_novels_collection.document()
-            firebase_novel_id = novel_ref.id
-            novel_ref.set({
-                "supabase_novel_id": novel_id,
-                "slug": slug,
-                "title": novel.title,
-                "imageCount": len(images)
-            })
-            
-            images_collection = novel_ref.collection("images")
+            images_data = []
             for image in images:
-                image_ref = images_collection.document(image["id"])
-                image_ref.set(image)
+                images_data.append({
+                    "novel_id": novel_id,
+                    "image_id": image["id"],
+                    "original_path": image.get("originalPath"),
+                    "content_type": image.get("contentType"),
+                    "size": image.get("size"),
+                    "data": image.get("data")
+                })
             
-            logger.info("Stored images in Firebase", count=len(images), firebase_id=firebase_novel_id)
+            if images_data:
+                try:
+                    # Insert images in batches
+                    img_batch_size = 10
+                    for i in range(0, len(images_data), img_batch_size):
+                        supabase.table('epub_images').insert(images_data[i:i+img_batch_size]).execute()
+                    logger.info("Stored images in Supabase", count=len(images))
+                except Exception as img_error:
+                    logger.error("Error storing images in Supabase", error=str(img_error))
+                    # We don't roll back the whole novel if images fail, just log it
             
         return NovelUploadResponse(
             title=novel.title,
@@ -163,55 +220,43 @@ async def upload_epub(file: UploadFile):
     finally:
         await file.close()
 
-
 @router.get("/novel/{novel_id}/image/{image_id}")
 async def get_novel_image(novel_id: str, image_id: str):
     """
     Retrieve an image from a specific novel by image ID.
-    Images are stored in Firebase under epub_images collection.
-    novel_id can be either the Firebase document ID or the Supabase novel slug.
+    novel_id can be either the UUID or the novel slug.
     """
     try:
-        novel_ref = None
+        supabase = get_supabase_client()
         
-        # First try direct Firebase lookup
-        direct_ref = firebase_novels_collection.document(novel_id)
-        direct_doc = direct_ref.get()
+        # Resolve novel_id to UUID if it's a slug
+        actual_novel_id = novel_id
+        if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', novel_id, re.I):
+            res = supabase.table('novels').select('id').eq('slug', novel_id).execute()
+            if res.data:
+                actual_novel_id = res.data[0]['id']
+            else:
+                raise HTTPException(status_code=404, detail="Novel not found")
         
-        if direct_doc.exists:
-            novel_ref = direct_ref
-        else:
-            # Try to find by slug (for Supabase novels)
-            query = firebase_novels_collection.where("slug", "==", novel_id).limit(1).stream()
-            for doc in query:
-                novel_ref = doc.reference
-                break
+        # Get the image from Supabase
+        result = supabase.table('epub_images').select('*').eq('novel_id', actual_novel_id).eq('image_id', image_id).execute()
         
-        if not novel_ref:
-            raise HTTPException(status_code=404, detail="Novel not found")
-        
-        # Get the image from the images subcollection
-        image_ref = novel_ref.collection("images").document(image_id)
-        image_doc = image_ref.get()
-        
-        if not image_doc.exists:
+        if not result.data:
             raise HTTPException(status_code=404, detail="Image not found")
         
-        image_data = image_doc.to_dict()
+        image_data = result.data[0]
         
-        # Decode the base64 image data
         try:
             image_bytes = base64.b64decode(image_data["data"])
-        except Exception as e:
+        except Exception:
             raise HTTPException(status_code=500, detail="Error decoding image data")
         
-        # Return the image with appropriate content type
         return Response(
             content=image_bytes,
-            media_type=image_data.get("contentType", "image/jpeg"),
+            media_type=image_data.get("content_type", "image/jpeg"),
             headers={
                 "Cache-Control": "public, max-age=3600",
-                "Content-Disposition": f"inline; filename=\"{image_data.get('originalPath', 'image')}\"",
+                "Content-Disposition": f"inline; filename=\"{image_data.get('original_path', 'image')}\"",
             }
         )
         
@@ -220,45 +265,35 @@ async def get_novel_image(novel_id: str, image_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving image: {str(e)}")
 
-
 @router.get("/novel/{novel_id}/images", response_model=NovelImagesResponse)
 async def get_novel_images_list(novel_id: str):
     """
     Get a list of all images in a novel with their metadata.
     """
     try:
-        novel_ref = None
+        supabase = get_supabase_client()
         
-        # First try direct Firebase lookup
-        direct_ref = firebase_novels_collection.document(novel_id)
-        direct_doc = direct_ref.get()
+        # Resolve novel_id to UUID if it's a slug
+        actual_novel_id = novel_id
+        if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', novel_id, re.I):
+            res = supabase.table('novels').select('id').eq('slug', novel_id).execute()
+            if res.data:
+                actual_novel_id = res.data[0]['id']
+            else:
+                raise HTTPException(status_code=404, detail="Novel not found")
         
-        if direct_doc.exists:
-            novel_ref = direct_ref
-        else:
-            # Try to find by slug
-            query = firebase_novels_collection.where("slug", "==", novel_id).limit(1).stream()
-            for doc in query:
-                novel_ref = doc.reference
-                break
+        # Get all images from Supabase
+        result = supabase.table('epub_images').select('image_id, original_path, content_type, size').eq('novel_id', actual_novel_id).execute()
         
-        if not novel_ref:
-            raise HTTPException(status_code=404, detail="Novel not found or has no images")
-        
-        # Get all images from the images subcollection
-        images_collection = novel_ref.collection("images")
         images = []
-        
-        for image_doc in images_collection.stream():
-            image_data = image_doc.to_dict()
-            image_info = ImageInfo(
-                id=image_doc.id,
-                originalPath=image_data.get("originalPath"),
-                contentType=image_data.get("contentType"),
-                size=image_data.get("size"),
-                url=f"/novel/{novel_id}/image/{image_doc.id}"
-            )
-            images.append(image_info)
+        for img in result.data:
+            images.append(ImageInfo(
+                id=img["image_id"],
+                originalPath=img.get("original_path"),
+                contentType=img.get("content_type"),
+                size=img.get("size"),
+                url=f"/novel/{novel_id}/image/{img['image_id']}"
+            ))
         
         return NovelImagesResponse(
             novelId=novel_id,
