@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: audiobook-python
+    env: docker
+    plan: free
+    region: ohio
+    buildCommand: docker build -t audiobook-python .
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker -b 0.0.0.0:$PORT --workers 2 --timeout 120 app.main:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SHEET_ID
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
