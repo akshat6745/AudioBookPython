@@ -24,7 +24,9 @@ pip install -r requirements.txt
 3. Configure environment variables:
 Create a `.env` file in the root directory (you can copy `.env.example` as a starting point):
 ```
-SHEET_ID=1VRLgR_6cCJeXVh6N3IAiwrlxEmeDbc03CqqSZ_o57so
+SHEET_ID=your_google_sheet_id
+SUPABASE_URL=your_supabase_project_url
+SUPABASE_KEY=your_supabase_anon_key
 ENVIRONMENT=development
 DEBUG=True
 LOG_LEVEL=DEBUG
@@ -43,56 +45,31 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 4. `POST /tts` - Convert text to speech using Edge TTS
 5. `GET /health` - Health check endpoint (returns 200 OK if service is healthy)
 
-## Deployment Options
+## Deployment
 
-### Docker Deployment
+For detailed deployment instructions, please refer to [DEPLOYMENT.md](DEPLOYMENT.md).
 
-1. Make sure you have Docker and Docker Compose installed.
+### Render Deployment (Recommended)
 
-2. Create a `.env` file with your environment variables:
-```
-SHEET_ID=your_google_document_id_here
-ENVIRONMENT=production
-DEBUG=False
-LOG_LEVEL=INFO
-```
+This project includes a `render.yaml` Blueprint for easy deployment on Render.
 
-3. Build and start the Docker container:
-```bash
-docker-compose up -d
-```
+1. Push your code to a GitHub repository.
+2. Log in to [Render](https://render.com) and create a new **Blueprint Instance**.
+3. Connect your repository.
+4. Provide the required environment variables when prompted:
+   - `SHEET_ID`
+   - `SUPABASE_URL`
+   - `SUPABASE_KEY`
 
-This will start the API service on port 8080.
-
-### Heroku Deployment
-
-This repository includes Heroku configuration files (Procfile and runtime.txt).
-
-1. Install the Heroku CLI and log in:
-```bash
-heroku login
-```
-
-2. Create a new Heroku app:
-```bash
-heroku create your-app-name
-```
-
-3. Set required environment variables:
-```bash
-heroku config:set SHEET_ID=your_google_document_id_here
-```
-
-4. Deploy to Heroku:
-```bash
-git push heroku main
-```
+Render will automatically build and deploy the application using the provided Dockerfile.
 
 ### Configuration Options
 
 For all deployment methods, you can configure the application using environment variables:
 
 - `SHEET_ID`: (Required) Google Document ID containing novel names
+- `SUPABASE_URL`: (Required) Supabase Project URL
+- `SUPABASE_KEY`: (Required) Supabase API Key (service role or anon key)
 - `ENVIRONMENT`: `development` or `production` (default: `production`)
 - `DEBUG`: `True` or `False` (default: `False`)
 - `LOG_LEVEL`: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL` (default: `INFO`)
