@@ -2,11 +2,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
 import aiohttp
 import structlog
 import logging
 import sys
 import warnings
+
+# Load .env FIRST before any app module that reads env vars at import time
+load_dotenv()
 
 from app.api import novels, tts, user, epub, download
 from app.core.settings import settings

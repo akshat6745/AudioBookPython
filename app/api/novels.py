@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from typing import List, Optional
 from bs4 import BeautifulSoup, Tag, NavigableString, Comment
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
-from app.core.supabase_client import get_supabase_client
+from app.core.d1_client import get_d1_client
+from app.services.cloudflare_service import get_chapter_paragraphs
 import aiohttp
 import re
 from fastapi.responses import StreamingResponse
@@ -122,132 +123,154 @@ def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -
 
 @router.get("/novels", response_model=List[NovelInfo])
 async def fetch_names():
-    """Fetch novels from Supabase only - optimized for speed."""
+    """Fetch all novels from Cloudflare D1."""
     try:
-        supabase = get_supabase_client()
-        result = supabase.table('novels').select(
-            'id, slug, title, author, genres, status, description'
-        ).order('updated_at', desc=True).execute()
-        
+        d1 = get_d1_client()
+        rows = await d1.query(
+            "SELECT id, id AS slug, title, author, description, total_chapters "
+            "FROM novels ORDER BY total_chapters DESC"
+        )
+
         novels = [
             NovelInfo(
-                id=str(row['id']),
-                slug=row['slug'],
-                title=row['title'],
-                author=row.get('author'),
-                chapterCount=None,
-                source="supabase",
-                status=row.get('status'),
-                genres=row.get('genres'),
-                description=row.get('description')
+                id=str(row["id"]),
+                slug=str(row["id"]),        # slug == id in D1
+                title=row["title"],
+                author=row.get("author"),
+                chapterCount=row.get("total_chapters"),
+                source="cloudflare_d1",
+                description=row.get("description"),
             )
-            for row in result.data
+            for row in rows
         ]
-        
-        logger.info("Fetched novels from Supabase", count=len(novels))
+
+        logger.info("Fetched novels from D1", count=len(novels))
         return novels
     except Exception as e:
-        logger.error("Error fetching novels from Supabase", error=str(e))
+        logger.error("Error fetching novels from D1", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error fetching novels: {str(e)}")
+
+
+async def resolve_novel_id(d1, name: str) -> str:
+    """
+    Resolve a novel identifier (slug OR title) to a D1 novel ID (slug).
+    Tries exact slug match first, then case-insensitive title fallback.
+    Raises 404 if not found.
+    """
+    # 1. Try slug (exact)
+    rows = await d1.query("SELECT id FROM novels WHERE id = ?", [name])
+    if rows:
+        return rows[0]["id"]
+
+    # 2. Try title (case-insensitive) — for old frontend clients
+    rows = await d1.query(
+        "SELECT id FROM novels WHERE LOWER(title) = LOWER(?)", [name]
+    )
+    if rows:
+        return rows[0]["id"]
+
+    raise HTTPException(status_code=404, detail=f"Novel '{name}' not found")
+
 
 @router.get("/chapters-with-pages/{novel_name}")
 async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
-    """Fetch paginated chapters for a novel from Supabase."""
+    """Fetch paginated chapter list (metadata only) from Cloudflare D1."""
     try:
-        supabase = get_supabase_client()
-        
-        # Get the novel by slug
-        novel_result = supabase.table('novels').select('id').eq('slug', novel_name).single().execute()
-        
-        if not novel_result.data:
-            # Try by title if slug fails (backward compatibility for some routes)
-            novel_result = supabase.table('novels').select('id').eq('title', novel_name).single().execute()
+        d1 = get_d1_client()
+        limit  = 100
+        offset = (page - 1) * limit
 
-        if novel_result.data:
-            novel_id = novel_result.data['id']
-            
-            # Calculate pagination (100 chapters per page, ascending order)
-            start = (page - 1) * 100
-            end = start + 99
-            
-            # Get chapters with pagination
-            chapters_result = supabase.table('chapters').select(
-                'id, chapter_number, chapter_title, word_count'
-            ).eq('novel_id', novel_id).order(
-                'chapter_number', desc=False
-            ).range(start, end).execute()
-            
-            # Get total chapter count
-            total_result = supabase.table('chapters').select(
-                'id', count='exact'
-            ).eq('novel_id', novel_id).execute()
-            
-            total_chapters = total_result.count if total_result.count else 0
-            total_pages = (total_chapters + 99) // 100
-            
-            chapters = []
-            for ch in chapters_result.data:
-                chapters.append({
-                    "chapterNumber": ch['chapter_number'],
-                    "chapterTitle": ch['chapter_title'],
-                    "id": str(ch['id']),
-                    "wordCount": ch.get('word_count')
-                })
-            
-            logger.info("Fetched chapters from Supabase", novel=novel_name, count=len(chapters))
-            return {
-                "chapters": chapters,
-                "total_pages": total_pages,
-                "current_page": page
+        novel_id = await resolve_novel_id(d1, novel_name)
+
+        # total_chapters from novels table is a fast cached count
+        novel_row = await d1.query("SELECT total_chapters FROM novels WHERE id = ?", [novel_id])
+        total_chapters = novel_row[0].get("total_chapters", 0) if novel_row else 0
+        total_pages    = max(1, (total_chapters + limit - 1) // limit)
+
+        chapter_rows = await d1.query(
+            "SELECT chapter_number, title AS chapter_title, word_count "
+            "FROM chapters WHERE novel_id = ? "
+            "ORDER BY chapter_number ASC LIMIT ? OFFSET ?",
+            [novel_id, limit, offset],
+        )
+
+        chapters = [
+            {
+                "chapterNumber": ch["chapter_number"],
+                "chapterTitle":  ch.get("chapter_title", f"Chapter {ch['chapter_number']}"),
+                "id":            f"{novel_id}_ch_{ch['chapter_number']}",
+                "wordCount":     ch.get("word_count"),
             }
-        
-        raise HTTPException(status_code=404, detail=f"Novel '{novel_name}' not found")
+            for ch in chapter_rows
+        ]
+
+        logger.info("Fetched chapters from D1", novel=novel_id, count=len(chapters))
+        return {
+            "chapters":     chapters,
+            "total_pages":  total_pages,
+            "current_page": page,
+        }
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching chapters: {str(e)}")
 
+
 @router.get("/chapter")
 async def fetch_chapter(chapterNumber: int, novelName: str):
-    """Fetch a single chapter's content from Supabase."""
+    """
+    Fetch a single chapter's content.
+    Metadata comes from Cloudflare D1; text content is streamed from R2.
+    Accepts both slug ('shadow-slave') and title ('Shadow Slave').
+    """
     try:
-        supabase = get_supabase_client()
-        
-        # Get the novel by slug or title
-        novel_result = supabase.table('novels').select('id').eq('slug', novelName).execute()
-        if not novel_result.data:
-            novel_result = supabase.table('novels').select('id').eq('title', novelName).execute()
-        
-        if novel_result.data:
-            novel_id = novel_result.data[0]['id']
-            
-            # Get the chapter
-            chapter_result = supabase.table('chapters').select(
-                'chapter_number, chapter_title, content, word_count'
-            ).eq('novel_id', novel_id).eq('chapter_number', chapterNumber).single().execute()
-            
-            if chapter_result.data:
-                ch = chapter_result.data
-                content = ch['content'] if ch['content'] else []
-                
-                logger.info("Fetched chapter from Supabase", novel=novelName, chapter=chapterNumber)
-                return {
-                    "chapterNumber": ch['chapter_number'],
-                    "chapterTitle": ch['chapter_title'],
-                    "content": content
-                }
-        
-        raise HTTPException(status_code=404, detail=f"Chapter {chapterNumber} not found for novel '{novelName}'")
+        d1 = get_d1_client()
+        novel_id = await resolve_novel_id(d1, novelName)
+
+        rows = await d1.query(
+            "SELECT chapter_number, title, r2_content_path "
+            "FROM chapters WHERE novel_id = ? AND chapter_number = ?",
+            [novel_id, chapterNumber],
+        )
+
+        if not rows:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Chapter {chapterNumber} not found for novel '{novelName}'",
+            )
+
+        row        = rows[0]
+        r2_key     = row["r2_content_path"]
+        chap_title = row.get("title", f"Chapter {chapterNumber}")
+
+        # Fetch actual text from R2 (runs in thread pool to avoid blocking event loop)
+        paragraphs = await asyncio.get_event_loop().run_in_executor(
+            None, get_chapter_paragraphs, r2_key
+        )
+
+        logger.info("Fetched chapter from R2", novel=novelName, chapter=chapterNumber,
+                    paragraphs=len(paragraphs))
+        return {
+            "chapterNumber": chapterNumber,
+            "chapterTitle":  chap_title,
+            "content":       paragraphs,
+        }
+
     except HTTPException:
         raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        logger.error("Error fetching chapter", novel=novelName, chapter=chapterNumber, error=str(e))
         raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}")
+
 
 @router.get("/novel-with-tts")
 async def novel_with_tts(novelName: str, chapterNumber: int, voice: str, dialogueVoice: str):
     try:
         chapter = await fetch_chapter(chapterNumber, novelName)
-        paragraphs = chapter.get("content", [])
+        paragraphs    = chapter.get("content", [])
         chapter_title = chapter.get("chapterTitle", "Unknown Title")
         
         if not paragraphs:

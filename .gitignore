@@ -37,6 +37,8 @@ _OceanofPDF.com_Bastion_-_Phil_Tucker.epub
 
 .venv/
 
-
 # Any epub files
 *.epub
+
+# Cloudflare Wrangler Cache
+.wrangler/

@@ -14,10 +14,21 @@ class Settings(BaseSettings):
     # External Services
     SHEET_ID: Optional[str] = None
     
-    # Supabase
+    # Supabase (kept for user auth + EPUB upload)
     SUPABASE_URL: str
     SUPABASE_KEY: str
-    
+
+    # Cloudflare D1 (novels + chapter metadata)
+    CF_ACCOUNT_ID: Optional[str] = None
+    CF_API_TOKEN: Optional[str] = None
+    D1_DATABASE_ID: Optional[str] = None
+
+    # Cloudflare R2 (chapter content files)
+    R2_ACCESS_KEY_ID: Optional[str] = None
+    R2_SECRET_ACCESS_KEY: Optional[str] = None
+    R2_BUCKET_NAME: Optional[str] = None
+    R2_ENDPOINT_URL: Optional[str] = None
+
     # Upload verification
     VERIFY_UPLOADS: bool = True # Automatically verify content after upload
     
