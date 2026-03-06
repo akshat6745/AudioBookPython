@@ -1,69 +1,94 @@
 # Novel Reader API Documentation
 
 ## Version
-Current API Version: 1.0
+Current API Version: 2.0
 
 ## Base URL
 ```
 http://localhost:8080
 ```
 
+---
+
 ## Endpoints
 
 ### 1. Health Check
 
-#### 1.1 Health Status
-```
-GET /health
-```
+#### GET `/health`
 Get the health status of the API service.
 
-Response:
+**Response:**
 ```json
 {
-  "status": "healthy"
+  "status": "healthy",
+  "env": "development"
 }
 ```
 
+---
+
 ### 2. Novel Management
 
-#### 2.1 Get All Novels
-```
-GET /novels
-```
-Returns a list of all available novels from both Google Doc and uploaded EPUBs.
+#### GET `/novels`
+Returns a list of all available novels from Supabase database and uploaded EPUBs.
 
-Response format:
+**Response:**
 ```json
 [
   {
-    "id": null,
-    "title": "novel-name",
-    "author": null,
-    "chapterCount": null,
-    "source": "google_doc"
+    "id": "23",
+    "slug": "mother-of-learning",
+    "title": "Mother of Learning",
+    "author": "nobody103",
+    "chapterCount": 112,
+    "source": "supabase",
+    "status": "Completed",
+    "genres": ["Fantasy", "Adventure", "Action"],
+    "description": "Zorian is a teenage mage of humble birth...",
+    "hasImages": false,
+    "imageCount": 0
   },
   {
     "id": "firebase-doc-id",
-    "title": "Novel Title",
+    "slug": null,
+    "title": "My Uploaded Novel",
     "author": "Author Name",
     "chapterCount": 85,
-    "source": "epub_upload"
+    "source": "epub_upload",
+    "status": null,
+    "genres": null,
+    "description": null,
+    "hasImages": true,
+    "imageCount": 5
   }
 ]
 ```
 
-#### 2.2 Upload EPUB Novel
-```
-POST /upload-epub
-Content-Type: multipart/form-data
-```
-Upload and parse an EPUB file for storage in the database.
+**Fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | string | Unique identifier |
+| `slug` | string\|null | URL-friendly identifier (use this for API calls) |
+| `title` | string | Novel title |
+| `author` | string\|null | Author name |
+| `chapterCount` | int\|null | Total number of chapters |
+| `source` | string | `"supabase"` or `"epub_upload"` |
+| `status` | string\|null | e.g., "Completed", "Ongoing", "Unknown" |
+| `genres` | string[]\|null | Array of genre tags |
+| `description` | string\|null | Novel synopsis |
+| `hasImages` | bool | Whether novel contains images (EPUB only) |
+| `imageCount` | int | Number of images (EPUB only) |
 
-Request:
-- Form data with key "file" containing the EPUB file
+> **Important:** For Supabase novels, use the `slug` field for all subsequent API calls. For EPUB novels, use the `title` field.
 
-Response:
+---
+
+#### POST `/upload-epub`
+Upload and parse an EPUB file for storage.
+
+**Request:** `multipart/form-data` with key `file` containing the EPUB file.
+
+**Response:**
 ```json
 {
   "title": "Novel Title",
@@ -73,41 +98,36 @@ Response:
 }
 ```
 
+---
+
 ### 3. Chapter Management
 
-#### 3.1 Get Chapters List
-```
-GET /chapters-with-pages/{novel_name}?page={page_number}
-```
-Get a paginated list of chapters for a novel. Works for both Google Doc novels and uploaded EPUBs.
+#### GET `/chapters-with-pages/{novel_identifier}`
+Get a paginated list of chapters for a novel.
 
-Parameters:
-- novel_name: The title of the novel (URL encoded)
-- page: Page number (optional, defaults to 1)
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `novel_identifier` | path | Novel `slug` (Supabase) or `title` (EPUB) |
+| `page` | query | Page number (default: 1, 100 chapters per page) |
 
-Response for web novels:
+**Example:** `GET /chapters-with-pages/mother-of-learning?page=1`
+
+**Response:**
 ```json
 {
   "chapters": [
     {
-      "chapterNumber": 1,
-      "chapterTitle": "Chapter 1",
-      "link": "https://novelfire.net/..."
-    }
-  ],
-  "total_pages": 10,
-  "current_page": 1
-}
-```
-
-Response for EPUB novels:
-```json
-{
-  "chapters": [
+      "chapterNumber": 112,
+      "chapterTitle": "Chapter 112 - The AU Chapter - Grand Whistler",
+      "id": "15293",
+      "wordCount": 8094
+    },
     {
-      "chapterNumber": 1,
-      "chapterTitle": "Chapter 1",
-      "id": "1"
+      "chapterNumber": 111,
+      "chapterTitle": "Chapter 111 - The AU Chapter - The Fourth Looper",
+      "id": "15397",
+      "wordCount": 8512
     }
   ],
   "total_pages": 2,
@@ -115,36 +135,44 @@ Response for EPUB novels:
 }
 ```
 
-#### 3.2 Get Chapter Content
-```
-GET /chapter?chapterNumber={number}&novelName={name}
-```
-Get the content of a specific chapter. Works for both Google Doc novels and uploaded EPUBs.
+> **Note:** Chapters are returned in **ascending order** (chapter 1 first). `wordCount` is only available for Supabase novels.
 
-Parameters:
-- chapterNumber: The chapter number
-- novelName: The title of the novel (URL encoded)
+---
 
-Response:
+#### GET `/chapter`
+Get the content of a specific chapter.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `novelName` | query | Novel `slug` (Supabase) or `title` (EPUB) |
+| `chapterNumber` | query | Chapter number (1-indexed) |
+
+**Example:** `GET /chapter?novelName=mother-of-learning&chapterNumber=1`
+
+**Response:**
 ```json
 {
+  "chapterNumber": 1,
+  "chapterTitle": "Chapter 1 - Good Morning Brother",
   "content": [
-    "Paragraph 1",
-    "Paragraph 2",
-    "..."
+    "Zorian's eyes abruptly shot open as a sharp pain erupted from his stomach.",
+    "\"Good morning, brother!\" an annoyingly cheerful voice sounded right on top of him.",
+    "Zorian glared at his little sister, but she just smiled back at him cheekily..."
   ]
 }
 ```
 
+> **Note:** The `content` array contains paragraphs ready for display or TTS processing. No HTML parsing required.
+
+---
+
 ### 4. Text-to-Speech
 
-#### 4.1 Convert Text to Speech
-```
-POST /tts
-```
+#### POST `/tts`
 Convert text to speech using Edge TTS.
 
-Request:
+**Request:**
 ```json
 {
   "text": "Text to convert to speech",
@@ -152,34 +180,88 @@ Request:
 }
 ```
 
-Response:
-- Audio file (audio/mp3)
+**Response:** Audio file (`audio/mp3`)
 
-#### 4.2 Convert Chapter to Speech with Dual Voices
+---
+
+#### POST `/tts-dual-voice`
+Convert text to speech with separate voices for narration and dialogue.
+
+**Request:**
+```json
+{
+  "text": "He said \"Hello there!\" and walked away.",
+  "paragraphVoice": "en-US-ChristopherNeural",
+  "dialogueVoice": "en-US-AriaNeural"
+}
 ```
-GET /novel-with-tts
+
+**Response:** Audio file (`audio/mp3`)
+
+---
+
+#### GET `/novel-with-tts`
+Fetch a chapter and convert it to speech with dual voices. Streams the audio.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `novelName` | query | Novel `slug` or `title` |
+| `chapterNumber` | query | Chapter number |
+| `voice` | query | Voice for narration |
+| `dialogueVoice` | query | Voice for dialogue |
+
+**Example:** 
 ```
-Fetch a novel chapter and convert it to speech using dual voices. The generated audio includes the chapter title at the beginning, followed by the chapter content.
-
-Parameters:
-- `novelName` (string, required): Name of the novel (URL encoded)
-- `chapterNumber` (integer, required): Chapter number to fetch
-- `voice` (string, required): Voice for narrative/paragraph content
-- `dialogueVoice` (string, required): Voice for dialogue content
-
-Response:
-- Audio file (audio/mp3)
-- Headers: `Content-Disposition: attachment; filename=chapter_{chapterNumber}.mp3`
-
-### 5. User Management
-
-#### 5.1 User Login
+GET /novel-with-tts?novelName=mother-of-learning&chapterNumber=1&voice=en-US-AvaMultilingualNeural&dialogueVoice=en-GB-RyanNeural
 ```
-POST /userLogin
+
+**Response:** Streaming audio file (`audio/mp3`)
+
+---
+
+### 5. Chapter Download
+
+#### GET `/download-chapter/{novel_name}/{chapter_number}`
+Download a chapter as a ZIP file containing content and audio files.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `novel_name` | path | Novel `slug` or `title` |
+| `chapter_number` | path | Chapter number |
+| `voice` | query | Voice for narration |
+| `dialogue_voice` | query | Voice for dialogue |
+| `progress_id` | query | Optional ID to track download progress |
+
+**Response:** ZIP file containing:
+- `content.json` - Chapter metadata and paragraphs
+- `audio/title.mp3` - Chapter title audio
+- `audio/0.mp3`, `audio/1.mp3`, ... - Paragraph audio files
+
+---
+
+#### GET `/download/progress/{progress_id}`
+Get the progress of an ongoing download.
+
+**Response:**
+```json
+{
+  "status": "processing",
+  "total": 50,
+  "current": 25,
+  "percent": 50.0
+}
 ```
+
+---
+
+### 6. User Management
+
+#### POST `/userLogin`
 Login with username and password.
 
-Request:
+**Request:**
 ```json
 {
   "username": "user",
@@ -187,7 +269,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "status": "success",
@@ -195,13 +277,12 @@ Response:
 }
 ```
 
-#### 5.2 User Registration
-```
-POST /register
-```
+---
+
+#### POST `/register`
 Register a new user.
 
-Request:
+**Request:**
 ```json
 {
   "username": "user",
@@ -209,7 +290,7 @@ Request:
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "status": "success",
@@ -217,22 +298,21 @@ Response:
 }
 ```
 
-#### 5.3 Save Reading Progress
-```
-POST /user/progress
-```
+---
+
+#### POST `/user/progress`
 Save user's reading progress for a novel.
 
-Request:
+**Request:**
 ```json
 {
   "username": "user",
-  "novelName": "novel-title",
+  "novelName": "mother-of-learning",
   "lastChapterRead": 10
 }
 ```
 
-Response:
+**Response:**
 ```json
 {
   "status": "success",
@@ -240,41 +320,47 @@ Response:
 }
 ```
 
-#### 5.4 Get User Progress
-```
-GET /user/progress?username={username}
-```
+---
+
+#### GET `/user/progress`
 Get all reading progress for a user.
 
-Response:
+**Parameters:** `username` (query)
+
+**Response:**
 ```json
 {
   "progress": [
     {
-      "novelName": "novel-title",
+      "novelName": "mother-of-learning",
       "lastChapterRead": 10
     }
   ]
 }
 ```
 
-#### 5.5 Get Novel Progress
-```
-GET /user/progress/{novelName}?username={username}
-```
+---
+
+#### GET `/user/progress/{novelName}`
 Get user's reading progress for a specific novel.
 
-Response:
+**Parameters:** 
+- `novelName` (path)
+- `username` (query)
+
+**Response:**
 ```json
 {
-  "novelName": "novel-title",
+  "novelName": "mother-of-learning",
   "lastChapterRead": 10
 }
 ```
 
+---
+
 ## Error Responses
 
-The API uses standard HTTP status codes and returns error details in JSON format:
+The API uses standard HTTP status codes:
 
 ```json
 {
@@ -282,80 +368,52 @@ The API uses standard HTTP status codes and returns error details in JSON format
 }
 ```
 
-Common error status codes:
-- 400: Bad Request (e.g., invalid input)
-- 401: Unauthorized (e.g., invalid login)
-- 404: Not Found (e.g., novel or user not found)
-- 500: Internal Server Error
+| Code | Meaning |
+|------|---------|
+| 400 | Bad Request (invalid input) |
+| 401 | Unauthorized (invalid login) |
+| 404 | Not Found (novel/chapter/user not found) |
+| 500 | Internal Server Error |
+| 504 | Gateway Timeout (TTS generation timeout) |
 
-## Data Structures
+---
 
-### Novel Types
-1. Google Doc Novels:
-   - Sourced from a Google Document
-   - Content fetched from novelfire.net
-   - Minimal metadata
+## Data Sources
 
-2. EPUB Novels:
-   - Uploaded through the /upload-epub endpoint
-   - Content stored in Firestore
-   - Full metadata including author and chapter count
+| Source | Identifier | Description |
+|--------|------------|-------------|
+| **Supabase** | `slug` | Primary novel database with pre-parsed content |
+| **EPUB Upload** | `title` | User-uploaded EPUB files stored in Firebase |
 
-### Database Structure (Firestore)
+### Database Structure
+
+**Supabase (novels & chapters):**
 ```
-novels/
-  {novel_id}/
-    title: string
-    author: string
-    chapterCount: number
-    source: "epub_upload"
-    id: string
-    chapters/
-      {chapter_number}/
-        chapterNumber: number
-        chapterTitle: string
-        content: string[]
-        id: string
-
-users/
-  {user_id}/
-    username: string
-    password: string
-    progress: [
-      {
-        novelName: string
-        lastChapterRead: number
-      }
-    ]
+novels: id, slug, title, author, genres, status, description
+chapters: id, novel_id, chapter_number, chapter_title, content (TEXT[]), word_count
 ```
 
-## Changes from Previous Version
+**Firebase (users & EPUB uploads):**
+```
+users/{user_id}: username, password, progress[]
+novels/{novel_id}: title, author, chapterCount, chapters/{chapter_number}
+```
 
-1. Added EPUB upload and parsing functionality
-2. Integrated Firestore storage for EPUB novels
-3. Unified chapter fetching interface for both novel sources
-4. Added novel metadata support (author, chapter count)
-5. Improved chapter content storage and retrieval
-6. Added source tracking for novels
+---
 
-## Frontend Considerations
+## Frontend Integration Notes
 
-1. Novel List:
-   - Display novels from both sources
-   - Show additional metadata for EPUB novels
-   - Implement upload functionality for EPUB files
+1. **Novel List:** 
+   - Store the `slug` field for Supabase novels to use in subsequent API calls
+   - For EPUB novels (`source: "epub_upload"`), use the `title` field instead
 
-2. Chapter List:
-   - Handle both link-based and stored chapters
-   - Implement pagination for both sources
-   - Display chapter numbers and titles consistently
+2. **Chapter Content:**
+   - Content is returned as an array of paragraphs - no HTML parsing needed
+   - Each paragraph can be rendered directly or sent for TTS
 
-3. Chapter Reading:
-   - Unified display for both content sources
-   - Preserve paragraph structure
-   - Integrate TTS functionality
+3. **Progress Tracking:**
+   - Use the novel's `slug` (or `title` for EPUB) as `novelName` when saving progress
 
-4. User Features:
-   - Reading progress tracking
-   - Login/Registration
-   - Progress synchronization
+4. **Available Voices:**
+   - Use `en-US-AvaMultilingualNeural`, `en-US-ChristopherNeural`, `en-GB-RyanNeural`, etc.
+   - Full list available via Edge TTS documentation

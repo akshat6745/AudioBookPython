@@ -122,29 +122,55 @@ def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -
     raise HTTPException(status_code=500, detail="Could not find chapter content")
 
 @router.get("/novels", response_model=List[NovelInfo])
-async def fetch_names():
-    """Fetch all novels from Cloudflare D1."""
+async def fetch_names(username: Optional[str] = None):
+    """Fetch novels the user has access to (their own + public)."""
     try:
         d1 = get_d1_client()
-        rows = await d1.query(
-            "SELECT id, id AS slug, title, author, description, total_chapters "
-            "FROM novels ORDER BY total_chapters DESC"
-        )
+
+        if username:
+            # Resolve user_id from username
+            user_rows = await d1.query(
+                "SELECT id FROM users WHERE username = ?", [username]
+            )
+            if user_rows:
+                user_id = user_rows[0]["id"]
+                rows = await d1.query(
+                    "SELECT n.id, n.id AS slug, n.title, n.author, n.description, "
+                    "n.total_chapters, n.is_public, up.updated_at AS last_read_date "
+                    "FROM novels n "
+                    "LEFT JOIN user_progress up ON up.novel_id = n.id AND up.user_id = ? "
+                    "WHERE n.user_id = ? OR n.is_public = 1 "
+                    "ORDER BY up.updated_at DESC NULLS LAST, n.total_chapters DESC",
+                    [user_id, user_id],
+                )
+            else:
+                # Unknown user — show only public novels
+                rows = await d1.query(
+                    "SELECT id, id AS slug, title, author, description, total_chapters, is_public "
+                    "FROM novels WHERE is_public = 1 ORDER BY total_chapters DESC"
+                )
+        else:
+            # No user specified — show only public novels
+            rows = await d1.query(
+                "SELECT id, id AS slug, title, author, description, total_chapters, is_public "
+                "FROM novels WHERE is_public = 1 ORDER BY total_chapters DESC"
+            )
 
         novels = [
             NovelInfo(
                 id=str(row["id"]),
-                slug=str(row["id"]),        # slug == id in D1
+                slug=str(row["id"]),
                 title=row["title"],
                 author=row.get("author"),
                 chapterCount=row.get("total_chapters"),
                 source="cloudflare_d1",
                 description=row.get("description"),
+                isPublic=bool(row.get("is_public", 0)),
             )
             for row in rows
         ]
 
-        logger.info("Fetched novels from D1", count=len(novels))
+        logger.info("Fetched novels from D1", count=len(novels), username=username)
         return novels
     except Exception as e:
         logger.error("Error fetching novels from D1", error=str(e))

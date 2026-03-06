@@ -5,6 +5,9 @@ import edge_tts
 import io
 import re
 import asyncio
+import structlog
+
+logger = structlog.get_logger()
 
 router = APIRouter()
 
@@ -70,30 +73,48 @@ async def text_to_speech_dual_voice(
         raise HTTPException(status_code=400, detail=f"Error in dual-voice text-to-speech conversion: {str(e)}")
 
 
-async def generate_audio(text: str, voice: str):
+async def generate_audio(text: str, voice: str, max_retries: int = 3):
+    """Generate audio with improved error handling and retry logic."""
+
     if not text or text.isspace():
         # For truly empty or whitespace-only text, generate minimal silence
-        communicate = edge_tts.Communicate(".", voice)
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-        return
+        text = "."
     elif re.match(r'^\W*$', text):
         # For non-word characters like "...", "---", etc., convert to readable pause
-        pause_text = "pause"
-        communicate = edge_tts.Communicate(pause_text, voice)
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-        return
+        text = "pause"
 
-    communicate = edge_tts.Communicate(text, voice)
-    try:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-    except edge_tts.exceptions.NoAudioReceived as e:
-        print(f"Warning: No audio received for text: '{text[:50]}...' using voice {voice}. Error: {e}")
-        # Yield a small silence (e.g. 0.5s) so the audio doesn't feel cut off? 
-        # Or just return. For now, we return successfully (empty audio for this part).
-        return
+    # Retry logic for TTS generation
+    for attempt in range(max_retries):
+        try:
+            logger.info("Generating TTS audio", voice=voice, text_length=len(text), attempt=attempt + 1)
+
+            communicate = edge_tts.Communicate(text, voice)
+
+            has_audio = False
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    has_audio = True
+                    yield chunk["data"]
+
+            if has_audio:
+                logger.info("TTS audio generated successfully", voice=voice, text_length=len(text))
+                return
+            else:
+                logger.warning("No audio chunks received", voice=voice, text_length=len(text), attempt=attempt + 1)
+
+        except edge_tts.exceptions.NoAudioReceived as e:
+            logger.warning("NoAudioReceived exception", voice=voice, text_preview=text[:50], error=str(e), attempt=attempt + 1)
+            if attempt == max_retries - 1:
+                # Last attempt failed, return empty (no audio for this part)
+                logger.error("Failed to generate audio after all retries", voice=voice, text_preview=text[:50])
+                return
+
+        except Exception as e:
+            logger.error("TTS generation error", voice=voice, text_preview=text[:50], error=str(e), attempt=attempt + 1)
+            if attempt == max_retries - 1:
+                # Re-raise on final attempt
+                raise HTTPException(status_code=500, detail=f"TTS generation failed after {max_retries} attempts: {str(e)}")
+
+        # Wait before retry
+        if attempt < max_retries - 1:
+            await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff

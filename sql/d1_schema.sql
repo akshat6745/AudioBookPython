@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS novels (
     cover_url       TEXT,                       -- R2 path or CDN URL
     language        TEXT DEFAULT 'en',
     total_chapters  INTEGER DEFAULT 0,
+    user_id         TEXT REFERENCES users(id),  -- owning user (NULL = unowned)
+    is_public       INTEGER DEFAULT 0,          -- 1 = accessible by all users
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now'))
 );
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS user_progress (
 
 
 -- ── INDEXES ───────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_novels_user_id  ON novels(user_id);
 CREATE INDEX IF NOT EXISTS idx_chapters_novel_id ON chapters(novel_id);
 CREATE INDEX IF NOT EXISTS idx_chapters_order    ON chapters(novel_id, chapter_number);
 CREATE INDEX IF NOT EXISTS idx_progress_user     ON user_progress(user_id);

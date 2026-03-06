@@ -70,8 +70,15 @@ async def save_user_progress(request: UserProgressRequest):
             """,
             [user_id, novel_id, request.lastChapterRead],
         )
+
+        rows = await d1.query(
+            "SELECT updated_at FROM user_progress WHERE user_id = ? AND novel_id = ?",
+            [user_id, novel_id],
+        )
+        last_read_date = rows[0]["updated_at"] if rows else None
+
         logger.info("Saved progress to D1", username=request.username, novel=request.novelName)
-        return {"status": "success", "message": "Progress saved"}
+        return {"status": "success", "message": "Progress saved", "lastReadDate": last_read_date}
     except Exception as e:
         logger.error("Error saving progress to D1", error=str(e))
         raise HTTPException(status_code=500, detail=f"Error saving progress: {str(e)}")
@@ -85,11 +92,11 @@ async def get_all_user_progress(username: str):
 
     d1 = get_d1_client()
     rows = await d1.query(
-        "SELECT novel_id, chapter_number FROM user_progress WHERE user_id = ?",
+        "SELECT novel_id, chapter_number, updated_at FROM user_progress WHERE user_id = ?",
         [user["id"]],
     )
     progress = [
-        {"novelName": r["novel_id"], "lastChapterRead": r["chapter_number"]}
+        {"novelName": r["novel_id"], "lastChapterRead": r["chapter_number"], "lastReadDate": r["updated_at"]}
         for r in rows
     ]
     return {"progress": progress}
@@ -105,8 +112,9 @@ async def get_user_progress_for_novel(novelName: str, username: str):
     novel_id = await resolve_novel_id(d1, novelName)
     
     rows = await d1.query(
-        "SELECT chapter_number FROM user_progress WHERE user_id = ? AND novel_id = ?",
+        "SELECT chapter_number, updated_at FROM user_progress WHERE user_id = ? AND novel_id = ?",
         [user["id"], novel_id],
     )
     last = rows[0]["chapter_number"] if rows else 1
-    return {"novelName": novelName, "lastChapterRead": last}
+    last_read_date = rows[0]["updated_at"] if rows else None
+    return {"novelName": novelName, "lastChapterRead": last, "lastReadDate": last_read_date}

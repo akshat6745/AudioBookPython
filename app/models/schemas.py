@@ -13,6 +13,7 @@ class NovelInfo(BaseModel):
     description: Optional[str] = None
     hasImages: Optional[bool] = False
     imageCount: Optional[int] = 0
+    isPublic: Optional[bool] = False
 
 class TTSRequest(BaseModel):
     text: str
