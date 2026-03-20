@@ -1,4 +1,5 @@
-from fastapi import APIRouter, UploadFile, HTTPException
+from fastapi import APIRouter, UploadFile, HTTPException, Form
+from typing import Optional
 from fastapi.responses import Response
 from app.models.schemas import NovelUploadResponse, ImageInfo, NovelImagesResponse
 from app.services.epub_parser import parse_epub_content
@@ -29,7 +30,7 @@ def calculate_word_count(content: list) -> int:
 # ── EPUB Upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload-epub", response_model=NovelUploadResponse)
-async def upload_epub(file: UploadFile):
+async def upload_epub(file: UploadFile, username: Optional[str] = Form(None)):
     """
     Upload and parse an EPUB file.
     Novel metadata → Cloudflare D1
@@ -45,6 +46,15 @@ async def upload_epub(file: UploadFile):
 
         d1   = get_d1_client()
         slug = generate_slug(novel.title)
+
+        # ── Resolve user_id from username ─────────────────────────────────────
+        user_id = None
+        if username:
+            user_rows = await d1.query(
+                "SELECT id FROM users WHERE username = ?", [username]
+            )
+            if user_rows:
+                user_id = user_rows[0]["id"]
 
         # ── Check if novel already exists in D1 ───────────────────────────────
         existing = await d1.query(
@@ -73,10 +83,10 @@ async def upload_epub(file: UploadFile):
         await d1.execute(
             """
             INSERT OR REPLACE INTO novels
-                (id, title, author, language, total_chapters, created_at, updated_at)
-            VALUES (?, ?, ?, 'en', ?, datetime('now'), datetime('now'))
+                (id, title, author, language, total_chapters, user_id, created_at, updated_at)
+            VALUES (?, ?, ?, 'en', ?, ?, datetime('now'), datetime('now'))
             """,
-            [slug, novel.title, novel.author or "Unknown", len(chapters)],
+            [slug, novel.title, novel.author or "Unknown", len(chapters), user_id],
         )
         logger.info("Inserted novel into D1", slug=slug, chapters=len(chapters))
 
