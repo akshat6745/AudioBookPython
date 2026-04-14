@@ -131,11 +131,21 @@ async def process_chapter_download(
     dialogue_voice: str
 ):
     """Background task to process chapter download."""
-    try:
-        # Update status to processing
-        download_status[download_id]["status"] = "processing"
-        download_status[download_id]["progress"] = 5
 
+    def update_status(**kwargs):
+        """Update status dict only if the download hasn't been cleaned up."""
+        if download_id not in download_status:
+            return
+        # Progress must never go backwards
+        if "progress" in kwargs:
+            kwargs["progress"] = max(
+                kwargs["progress"],
+                download_status[download_id].get("progress", 0),
+            )
+        download_status[download_id].update(kwargs)
+
+    try:
+        update_status(status="processing", progress=5)
         logger.info("Starting chapter processing", download_id=download_id)
 
         # Create download directory
@@ -153,10 +163,9 @@ async def process_chapter_download(
 
         # Calculate total files: content.json + title.mp3 + paragraph mp3s
         total_files = 1 + 1 + len(paragraphs)  # content + title + paragraphs
-        download_status[download_id]["total_files"] = total_files
-        download_status[download_id]["progress"] = 10
+        update_status(total_files=total_files, progress=10)
 
-        # 2. Save content.json (memory efficient - direct write)
+        # 2. Save content.json
         content_data = {
             "novel_name": novel_name,
             "chapter_number": chapter_number,
@@ -171,42 +180,46 @@ async def process_chapter_download(
         async with aiofiles.open(content_file, 'w') as f:
             await f.write(json.dumps(content_data, indent=2))
 
-        download_status[download_id]["completed_files"] = 1
-        download_status[download_id]["progress"] = 15
-
+        update_status(completed_files=1, progress=15)
         logger.info("Content saved", download_id=download_id)
 
-        # 3. Generate and save title audio (memory efficient - stream to file)
-        logger.info("Generating title audio", download_id=download_id)
-        title_file = download_dir / "title.mp3"
+        # 3 & 4. Generate title + all paragraph audio files concurrently
+        logger.info("Generating audio (parallel)", download_id=download_id, paragraphs=len(paragraphs))
 
-        async with aiofiles.open(title_file, 'wb') as f:
-            async for chunk in text_to_speech_dual_voice(chapter_title, narrator_voice, dialogue_voice):
-                await f.write(chunk)
+        from app.core.settings import settings
+        MAX_CONCURRENT = settings.TTS_MAX_CONCURRENT
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
-        download_status[download_id]["completed_files"] = 2
-        download_status[download_id]["progress"] = 20
+        async def save_audio(filename: str, text: str) -> str:
+            async with semaphore:
+                file_path = download_dir / filename
+                async with aiofiles.open(file_path, 'wb') as f:
+                    async for chunk in text_to_speech_dual_voice(text, narrator_voice, dialogue_voice):
+                        await f.write(chunk)
+            return filename
 
-        logger.info("Title audio saved", download_id=download_id)
+        # Build all tasks: title + every paragraph
+        audio_tasks = [asyncio.create_task(save_audio("title.mp3", chapter_title))]
+        audio_tasks += [
+            asyncio.create_task(save_audio(f"{i}.mp3", text))
+            for i, text in enumerate(paragraphs)
+        ]
 
-        # 4. Generate paragraph audio files (memory efficient - one at a time)
-        for i, paragraph_text in enumerate(paragraphs):
-            logger.info("Generating paragraph audio", download_id=download_id, paragraph=i, total=len(paragraphs))
+        completed_count = 1  # content.json already done
+        errors = []
+        for coro in asyncio.as_completed(audio_tasks):
+            try:
+                filename = await coro
+                completed_count += 1
+                progress = int((completed_count / total_files) * 100)
+                update_status(completed_files=completed_count, progress=progress)
+                logger.info("Audio saved", download_id=download_id, file=filename, progress=progress)
+            except Exception as e:
+                errors.append(str(e))
+                logger.error("Audio generation failed", download_id=download_id, error=str(e))
 
-            paragraph_file = download_dir / f"{i}.mp3"
-
-            # Stream audio directly to file (memory efficient)
-            async with aiofiles.open(paragraph_file, 'wb') as f:
-                async for chunk in text_to_speech_dual_voice(paragraph_text, narrator_voice, dialogue_voice):
-                    await f.write(chunk)
-
-            # Update progress
-            completed = 2 + i + 1  # content + title + current paragraph
-            progress = int((completed / total_files) * 100)
-            download_status[download_id]["completed_files"] = completed
-            download_status[download_id]["progress"] = progress
-
-            logger.info("Paragraph audio saved", download_id=download_id, paragraph=i, progress=progress)
+        if errors:
+            raise Exception(f"Audio generation failed for {len(errors)} file(s): {errors[0]}")
 
         # 5. Create file manifest
         file_urls = {
@@ -217,21 +230,22 @@ async def process_chapter_download(
             }
         }
 
-        # Mark as completed
-        download_status[download_id]["status"] = "completed"
-        download_status[download_id]["progress"] = 100
-        download_status[download_id]["files"] = file_urls
-        download_status[download_id]["completed_at"] = datetime.datetime.now().isoformat()
-
+        update_status(
+            status="completed",
+            progress=100,
+            files=file_urls,
+            completed_at=datetime.datetime.now().isoformat(),
+        )
         logger.info("Download completed successfully", download_id=download_id, total_files=total_files)
 
     except Exception as e:
         error_msg = str(e)
         logger.error("Download failed", download_id=download_id, error=error_msg)
-
-        download_status[download_id]["status"] = "error"
-        download_status[download_id]["error_message"] = error_msg
-        download_status[download_id]["failed_at"] = datetime.datetime.now().isoformat()
+        update_status(
+            status="error",
+            error_message=error_msg,
+            failed_at=datetime.datetime.now().isoformat(),
+        )
 
 @router.delete("/download/{download_id}")
 async def cleanup_download(download_id: str):

@@ -7,12 +7,10 @@ from typing import List, Dict, Tuple, Optional
 import uuid
 from app.models.schemas import Chapter, Novel
 
-def parse_epub_content(epub_content: bytes) -> Tuple[Novel, List[Dict], List[Dict]]:
+def parse_epub_content(epub_content: bytes) -> Tuple[Novel, List[Dict], List[Dict], Optional[bytes]]:
     """
     Parse an EPUB file and extract its content using the table of contents.
-    Returns a tuple of (Novel object, List of chapter dictionaries for Firestore, empty list for images)
-    
-    Images support has been removed. The third element will always be an empty list.
+    Returns (Novel, chapters, images_list, cover_image_bytes).
     """
     # Create an EPUB book object from the bytes
     temp_path = f"/tmp/{uuid.uuid4()}.epub"
@@ -43,8 +41,10 @@ def parse_epub_content(epub_content: bytes) -> Tuple[Novel, List[Dict], List[Dic
         chapters=chapters
     )
     
-    # Images support removed - return empty list
-    return novel, firestore_chapters, []
+    # Extract cover image from EPUB
+    cover_image = extract_cover_image(book)
+
+    return novel, firestore_chapters, [], cover_image
 
 def extract_chapters_from_toc(book) -> List[Dict]:
     """
@@ -266,3 +266,45 @@ def extract_content_from_elements(elements) -> List[str]:
                 content.append(re.sub(r'\s+', ' ', text))
 
     return content
+
+
+def extract_cover_image(book) -> Optional[bytes]:
+    """
+    Extract the cover image from an EPUB book.
+    Tries multiple strategies: metadata, item properties, filename heuristics.
+    Returns raw image bytes or None.
+    """
+    # Strategy 1: Check metadata for cover reference
+    cover_id = None
+    for meta in book.get_metadata('OPF', 'meta') or []:
+        attrs = meta[1] if len(meta) > 1 else {}
+        if attrs.get('name') == 'cover':
+            cover_id = attrs.get('content')
+            break
+
+    if cover_id:
+        for item in book.get_items():
+            if item.get_id() == cover_id:
+                return item.get_content()
+
+    # Strategy 2: Look for items with 'cover-image' property
+    for item in book.get_items():
+        props = getattr(item, 'properties', []) or []
+        if 'cover-image' in props:
+            return item.get_content()
+
+    # Strategy 3: Filename heuristics for image items
+    for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
+        name = (item.file_name or '').lower()
+        if 'cover' in name:
+            return item.get_content()
+
+    # Strategy 4: First image item as fallback
+    images = list(book.get_items_of_type(ebooklib.ITEM_IMAGE))
+    if images:
+        # Pick the largest image (likely the cover)
+        largest = max(images, key=lambda i: len(i.get_content()))
+        if len(largest.get_content()) > 5000:  # Skip tiny icons
+            return largest.get_content()
+
+    return None

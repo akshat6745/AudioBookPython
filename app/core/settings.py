@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     # Upload verification
     VERIFY_UPLOADS: bool = True # Automatically verify content after upload
+
+    # TTS concurrency
+    TTS_MAX_CONCURRENT: int = 10
     
     @property
     def is_local(self) -> bool:

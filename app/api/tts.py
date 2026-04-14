@@ -2,9 +2,9 @@ from fastapi import APIRouter, HTTPException, Body
 from fastapi.responses import StreamingResponse
 from app.models.schemas import TTSDualVoiceRequest
 import edge_tts
-import io
 import re
 import asyncio
+import time
 import structlog
 
 logger = structlog.get_logger()
@@ -26,11 +26,17 @@ async def text_to_speech_dual_voice_post(request: TTSDualVoiceRequest = Body(...
         }
     )
 
+async def collect_audio(text: str, voice: str) -> bytes:
+    chunks = []
+    async for chunk in generate_audio(text, voice):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def text_to_speech_dual_voice(
     text: str, paragraph_voice: str = "en-US-ChristopherNeural", dialogue_voice: str = "en-US-JennyNeural"
 ):
     try:
-        # Replace specific patterns and check for non-speaking characters
         text = re.sub(r'\*\s*\*\s*\*', "Asterisk Asterisk Asterisk", text)
         text = re.sub(
             r'\s*([^S]*?website on Google to access chapters of novels early and in the highest quality[^.]*\.)\s*',
@@ -39,55 +45,71 @@ async def text_to_speech_dual_voice(
             flags=re.IGNORECASE
         )
 
-        # Split text into dialogue and paragraph parts
-        dialogue_pattern = r'["“](.*?)["”]'
+        dialogue_pattern = r'[\u201c\u201d"](.*?)[\u201c\u201d"]'
         dialogue_matches = re.finditer(dialogue_pattern, text)
 
+        segments = []
         last_index = 0
 
         for match in dialogue_matches:
             start, end = match.span()
 
-            # Paragraph before dialogue
             paragraph_text = text[last_index:start].strip()
             if paragraph_text:
-                async for chunk in generate_audio(paragraph_text, paragraph_voice):
-                    yield chunk
+                segments.append((paragraph_text, paragraph_voice))
 
-            # Dialogue
             dialogue_text = match.group(1).strip()
-            async for chunk in generate_audio(dialogue_text, dialogue_voice):
-                yield chunk
+            if dialogue_text:
+                segments.append((dialogue_text, dialogue_voice))
 
             last_index = end
 
-        # Remaining paragraph after last dialogue
         remaining_paragraph = text[last_index:].strip()
         if remaining_paragraph:
-            async for chunk in generate_audio(remaining_paragraph, paragraph_voice):
-                yield chunk
+            segments.append((remaining_paragraph, paragraph_voice))
+
+        logger.info("tts_start", segments=len(segments), text_length=len(text))
+        t0 = time.perf_counter()
+
+        tasks = [collect_audio(seg_text, seg_voice) for seg_text, seg_voice in segments]
+        results = await asyncio.gather(*tasks)
+
+        # If a dialogue segment produced no audio, fall back to narrator voice
+        fallback_tasks = []
+        fallback_indices = []
+        for i, ((seg_text, seg_voice), audio_bytes) in enumerate(zip(segments, results)):
+            if not audio_bytes and seg_voice == dialogue_voice:
+                logger.warning("dialogue_fallback", text_preview=seg_text[:50])
+                fallback_tasks.append(collect_audio(seg_text, paragraph_voice))
+                fallback_indices.append(i)
+
+        if fallback_tasks:
+            fallback_results = await asyncio.gather(*fallback_tasks)
+            results = list(results)
+            for i, audio_bytes in zip(fallback_indices, fallback_results):
+                results[i] = audio_bytes
+
+        elapsed = time.perf_counter() - t0
+        total_bytes = sum(len(r) for r in results)
+        logger.info("tts_done", time_taken_s=round(elapsed, 2), segments=len(segments), total_bytes=total_bytes)
+
+        for audio_bytes in results:
+            if audio_bytes:
+                yield audio_bytes
 
     except Exception as e:
-        # In a generator, we can't easily raise HTTP exceptions once streaming starts,
-        # but we can log it. For now, re-raise to be caught by the caller if it hasn't started yielding.
         raise HTTPException(status_code=400, detail=f"Error in dual-voice text-to-speech conversion: {str(e)}")
 
 
 async def generate_audio(text: str, voice: str, max_retries: int = 3):
-    """Generate audio with improved error handling and retry logic."""
-
     if not text or text.isspace():
-        # For truly empty or whitespace-only text, generate minimal silence
         text = "."
     elif re.match(r'^\W*$', text):
-        # For non-word characters like "...", "---", etc., convert to readable pause
         text = "pause"
 
-    # Retry logic for TTS generation
     for attempt in range(max_retries):
         try:
-            logger.info("Generating TTS audio", voice=voice, text_length=len(text), attempt=attempt + 1)
-
+            t0 = time.perf_counter()
             communicate = edge_tts.Communicate(text, voice)
 
             has_audio = False
@@ -96,25 +118,23 @@ async def generate_audio(text: str, voice: str, max_retries: int = 3):
                     has_audio = True
                     yield chunk["data"]
 
+            elapsed = time.perf_counter() - t0
             if has_audio:
-                logger.info("TTS audio generated successfully", voice=voice, text_length=len(text))
+                logger.info("segment_done", voice=voice, text_length=len(text), duration_s=round(elapsed, 2))
                 return
             else:
-                logger.warning("No audio chunks received", voice=voice, text_length=len(text), attempt=attempt + 1)
+                logger.warning("segment_no_audio", voice=voice, text_length=len(text), attempt=attempt + 1, duration_s=round(elapsed, 2))
 
         except edge_tts.exceptions.NoAudioReceived as e:
-            logger.warning("NoAudioReceived exception", voice=voice, text_preview=text[:50], error=str(e), attempt=attempt + 1)
+            logger.warning("segment_no_audio_received", voice=voice, text_preview=text[:50], error=str(e), attempt=attempt + 1)
             if attempt == max_retries - 1:
-                # Last attempt failed, return empty (no audio for this part)
-                logger.error("Failed to generate audio after all retries", voice=voice, text_preview=text[:50])
+                logger.error("segment_failed", voice=voice, text_preview=text[:50])
                 return
 
         except Exception as e:
-            logger.error("TTS generation error", voice=voice, text_preview=text[:50], error=str(e), attempt=attempt + 1)
+            logger.error("segment_error", voice=voice, text_preview=text[:50], error=str(e), attempt=attempt + 1)
             if attempt == max_retries - 1:
-                # Re-raise on final attempt
                 raise HTTPException(status_code=500, detail=f"TTS generation failed after {max_retries} attempts: {str(e)}")
 
-        # Wait before retry
         if attempt < max_retries - 1:
-            await asyncio.sleep(1 * (attempt + 1))  # Exponential backoff
+            await asyncio.sleep(0.5 * (attempt + 1))
