@@ -126,13 +126,15 @@ def read_chapter_text_from_r2(r2_key: str) -> str:
         raise
 
 
-def get_chapter_paragraphs(r2_key: str) -> list[str]:
+@lru_cache(maxsize=512)
+def get_chapter_paragraphs(r2_key: str) -> tuple[str, ...]:
     """
-    Read chapter from R2 and return a list of paragraph strings.
-    Each element is one paragraph; order is preserved exactly.
+    Read chapter from R2 and return a tuple of paragraph strings.
+    Cached in-memory by r2_key. Returns a tuple so the LRU value is immutable —
+    callers should treat it as read-only.
     """
     text = read_chapter_text_from_r2(r2_key)
-    return [p.strip() for p in text.split("\n\n") if p.strip()]
+    return tuple(p.strip() for p in text.split("\n\n") if p.strip())
 
 
 def reconstruct_chapter_text(r2_key: str) -> str:

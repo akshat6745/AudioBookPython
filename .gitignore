@@ -42,3 +42,10 @@ _OceanofPDF.com_Bastion_-_Phil_Tucker.epub
 
 # Cloudflare Wrangler Cache
 .wrangler/
+
+# Local chapter download cache (runtime output, not source)
+downloads/
+
+# Stray artifact from the old React Native app (audiobook-mobile) — this is
+# a Python service, not an npm package.
+package.json

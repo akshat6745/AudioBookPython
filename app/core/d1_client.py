@@ -12,7 +12,14 @@ class D1Client:
     """Async wrapper around the Cloudflare D1 REST API."""
 
     def __init__(self):
-        self._http = httpx.AsyncClient(timeout=15)
+        self._http = httpx.AsyncClient(
+            timeout=30,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=30.0,
+            ),
+        )
         self._url = (
             f"https://api.cloudflare.com/client/v4/accounts/{settings.CF_ACCOUNT_ID}"
             f"/d1/database/{settings.D1_DATABASE_ID}/query"

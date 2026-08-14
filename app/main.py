@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import aiohttp
@@ -59,6 +60,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Novel Reader API", lifespan=lifespan)
 
+
+class NormalizeSlashesMiddleware(BaseHTTPMiddleware):
+    """Collapse consecutive leading slashes (e.g. //novel/... → /novel/...)."""
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith("//"):
+            normalized = "/" + path.lstrip("/")
+            url = request.url.replace(path=normalized)
+            return RedirectResponse(url=str(url), status_code=301)
+        return await call_next(request)
+
+
+app.add_middleware(NormalizeSlashesMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

@@ -128,27 +128,20 @@ async def fetch_names(username: Optional[str] = None):
         d1 = get_d1_client()
 
         if username:
-            # Resolve user_id from username
-            user_rows = await d1.query(
-                "SELECT id FROM users WHERE username = ?", [username]
+            # Single round-trip: resolve user_id via subquery + fetch novels.
+            # If username doesn't exist, the subquery returns NULL and only public novels match.
+            rows = await d1.query(
+                "SELECT n.id, n.id AS slug, n.title, n.author, n.description, "
+                "n.total_chapters, n.is_public, up.updated_at AS last_read_date "
+                "FROM novels n "
+                "LEFT JOIN user_progress up "
+                "  ON up.novel_id = n.id "
+                " AND up.user_id = (SELECT id FROM users WHERE username = ?) "
+                "WHERE n.user_id = (SELECT id FROM users WHERE username = ?) "
+                "   OR n.is_public = 1 "
+                "ORDER BY up.updated_at DESC NULLS LAST, n.total_chapters DESC",
+                [username, username],
             )
-            if user_rows:
-                user_id = user_rows[0]["id"]
-                rows = await d1.query(
-                    "SELECT n.id, n.id AS slug, n.title, n.author, n.description, "
-                    "n.total_chapters, n.is_public, up.updated_at AS last_read_date "
-                    "FROM novels n "
-                    "LEFT JOIN user_progress up ON up.novel_id = n.id AND up.user_id = ? "
-                    "WHERE n.user_id = ? OR n.is_public = 1 "
-                    "ORDER BY up.updated_at DESC NULLS LAST, n.total_chapters DESC",
-                    [user_id, user_id],
-                )
-            else:
-                # Unknown user — show only public novels
-                rows = await d1.query(
-                    "SELECT id, id AS slug, title, author, description, total_chapters, is_public "
-                    "FROM novels WHERE is_public = 1 ORDER BY total_chapters DESC"
-                )
         else:
             # No user specified — show only public novels
             rows = await d1.query(
@@ -302,12 +295,27 @@ async def novel_with_tts(novelName: str, chapterNumber: int, voice: str, dialogu
         if not paragraphs:
             raise HTTPException(status_code=404, detail="Chapter content not found")
 
+        async def collect_paragraph_chunks(text: str) -> list[bytes]:
+            chunks = []
+            async for chunk in text_to_speech_dual_voice(text, voice, dialogueVoice):
+                chunks.append(chunk)
+            return chunks
+
         async def audio_generator():
-            async for chunk in text_to_speech_dual_voice(chapter_title, voice, dialogueVoice):
-                yield chunk
-            for paragraph in paragraphs:
-                async for chunk in text_to_speech_dual_voice(paragraph, voice, dialogueVoice):
-                    yield chunk
+            # Launch all paragraphs in parallel up front. The semaphore inside
+            # tts.py bounds true concurrency; we still yield in order so the
+            # output MP3 is sequentially correct.
+            items = [chapter_title, *paragraphs]
+            tasks = [asyncio.create_task(collect_paragraph_chunks(t)) for t in items]
+            try:
+                for task in tasks:
+                    for chunk in await task:
+                        yield chunk
+            except Exception:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                raise
 
         return StreamingResponse(
             audio_generator(),

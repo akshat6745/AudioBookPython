@@ -11,10 +11,30 @@ from botocore.exceptions import ClientError
 import re
 import gzip
 import base64
+import asyncio
 import structlog
 
 router = APIRouter()
 logger = structlog.get_logger()
+
+# Cache slug → Supabase novel UUID. Mapping is effectively immutable per novel,
+# so an unbounded dict is fine in practice (one entry per novel).
+_slug_uuid_cache: dict[str, str] = {}
+
+
+def _resolve_supabase_novel_id(supabase, novel_id: str) -> Optional[str]:
+    """Resolve a slug-or-UUID to the Supabase novel UUID, with in-memory caching."""
+    if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}', novel_id, re.I):
+        return novel_id
+    cached = _slug_uuid_cache.get(novel_id)
+    if cached:
+        return cached
+    res = supabase.table('novels').select('id').eq('slug', novel_id).execute()
+    if res.data:
+        actual_id = res.data[0]['id']
+        _slug_uuid_cache[novel_id] = actual_id
+        return actual_id
+    return None
 
 
 def generate_slug(title: str) -> str:
@@ -44,7 +64,11 @@ async def upload_epub(file: UploadFile, username: Optional[str] = Form(None)):
 
     try:
         content = await file.read()
-        novel, chapters, images, cover_image = parse_epub_content(content)
+        # Parse is CPU/IO heavy and fully synchronous — keep the event loop free.
+        loop = asyncio.get_running_loop()
+        novel, chapters, images, cover_image = await loop.run_in_executor(
+            None, parse_epub_content, content
+        )
 
         d1   = get_d1_client()
         slug = generate_slug(novel.title)
@@ -93,26 +117,34 @@ async def upload_epub(file: UploadFile, username: Optional[str] = Form(None)):
         logger.info("Inserted novel into D1", slug=slug, chapters=len(chapters))
 
         # ── Upload each chapter: text → R2, metadata → D1 ────────────────────
-        for chapter in chapters:
-            chap_num      = chapter["chapterNumber"]
-            chap_title    = chapter.get("chapterTitle", f"Chapter {chap_num}")
-            chap_content  = chapter.get("content", [])   # list of paragraph strings
-            word_count    = calculate_word_count(chap_content)
+        # Bound concurrency: R2 uploads are sync (boto3) and run in the executor
+        # thread pool, D1 inserts are async HTTP. Cap at 20 to avoid exhausting
+        # either pool while still giving a large speedup over serial.
+        chapter_sem = asyncio.Semaphore(20)
+        loop = asyncio.get_running_loop()
 
-            # Join paragraphs with double newline and gzip-compress
-            text      = "\n\n".join(p.strip() for p in chap_content if p.strip())
-            r2_key    = upload_chapter_text_to_r2(slug, chap_num, text)
+        async def upload_chapter(chapter):
+            chap_num     = chapter["chapterNumber"]
+            chap_title   = chapter.get("chapterTitle", f"Chapter {chap_num}")
+            chap_content = chapter.get("content", [])
+            word_count   = calculate_word_count(chap_content)
+            text         = "\n\n".join(p.strip() for p in chap_content if p.strip())
 
-            chapter_id = f"{slug}_ch_{chap_num}"
-            await d1.execute(
-                """
-                INSERT OR REPLACE INTO chapters
-                    (id, novel_id, chapter_number, title,
-                     r2_content_path, word_count, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-                """,
-                [chapter_id, slug, chap_num, chap_title, r2_key, word_count],
-            )
+            async with chapter_sem:
+                r2_key = await loop.run_in_executor(
+                    None, upload_chapter_text_to_r2, slug, chap_num, text
+                )
+                await d1.execute(
+                    """
+                    INSERT OR REPLACE INTO chapters
+                        (id, novel_id, chapter_number, title,
+                         r2_content_path, word_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    """,
+                    [f"{slug}_ch_{chap_num}", slug, chap_num, chap_title, r2_key, word_count],
+                )
+
+        await asyncio.gather(*(upload_chapter(c) for c in chapters))
 
         logger.info("Uploaded chapters to R2 + D1", slug=slug, count=len(chapters))
 
@@ -186,14 +218,9 @@ async def get_novel_image(novel_id: str, image_id: str):
     try:
         supabase = get_supabase_client()
 
-        # Resolve slug → UUID if needed
-        actual_id = novel_id
-        if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}', novel_id, re.I):
-            res = supabase.table('novels').select('id').eq('slug', novel_id).execute()
-            if res.data:
-                actual_id = res.data[0]['id']
-            else:
-                raise HTTPException(status_code=404, detail="Novel not found")
+        actual_id = _resolve_supabase_novel_id(supabase, novel_id)
+        if actual_id is None:
+            raise HTTPException(status_code=404, detail="Novel not found")
 
         result = supabase.table('epub_images').select('*').eq('novel_id', actual_id).eq('image_id', image_id).execute()
         if not result.data:
@@ -225,13 +252,9 @@ async def get_novel_images_list(novel_id: str):
     try:
         supabase = get_supabase_client()
 
-        actual_id = novel_id
-        if not re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}', novel_id, re.I):
-            res = supabase.table('novels').select('id').eq('slug', novel_id).execute()
-            if res.data:
-                actual_id = res.data[0]['id']
-            else:
-                raise HTTPException(status_code=404, detail="Novel not found")
+        actual_id = _resolve_supabase_novel_id(supabase, novel_id)
+        if actual_id is None:
+            raise HTTPException(status_code=404, detail="Novel not found")
 
         result = supabase.table('epub_images').select(
             'image_id, original_path, content_type, size'
