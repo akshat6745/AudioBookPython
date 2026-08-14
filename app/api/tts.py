@@ -11,6 +11,69 @@ logger = structlog.get_logger()
 
 router = APIRouter()
 
+# Cap concurrent edge-tts segment generations across the whole process.
+# Why: edge-tts is rate-limited and unbounded gather() over a long chapter
+# spawns 100+ websocket handshakes simultaneously, causing throttling and OOM.
+_TTS_SEMAPHORE = asyncio.Semaphore(10)
+
+
+async def _collect_audio_bounded(text: str, voice: str) -> bytes:
+    async with _TTS_SEMAPHORE:
+        return await collect_audio(text, voice)
+
+
+# In-process cache for /tts-voices — edge_tts.list_voices() is a network call
+# to Microsoft's voice catalog and the catalog changes rarely, so hitting it
+# on every app request would add needless latency and an extra external
+# dependency to the request path. Refreshed at most once per TTL.
+_VOICES_CACHE: list[dict] | None = None
+_VOICES_CACHE_AT: float = 0.0
+_VOICES_CACHE_TTL_S = 24 * 60 * 60
+
+
+@router.get("/tts-voices")
+async def list_tts_voices():
+    """English-locale edge-tts voices, shaped for the app's voice picker.
+
+    Mirrors the fields the on-device Kokoro picker already surfaces (name,
+    gender, accent, personality/style) so both online and offline voice
+    selection can share one UI, rather than the client hardcoding a
+    handful of voice names.
+    """
+    global _VOICES_CACHE, _VOICES_CACHE_AT
+    now = time.monotonic()
+    if _VOICES_CACHE is not None and (now - _VOICES_CACHE_AT) < _VOICES_CACHE_TTL_S:
+        return {"voices": _VOICES_CACHE}
+
+    try:
+        raw_voices = await edge_tts.list_voices()
+    except Exception as e:
+        logger.error("tts_voices_fetch_failed", error=str(e))
+        # Serve a stale cache rather than a hard failure if we have one.
+        if _VOICES_CACHE is not None:
+            return {"voices": _VOICES_CACHE}
+        raise HTTPException(status_code=502, detail=f"Could not fetch voice list: {str(e)}")
+
+    voices = [
+        {
+            "shortName": v["ShortName"],
+            "displayName": v["ShortName"].split("-")[-1].replace("Neural", "").replace("Multilingual", ""),
+            "gender": v["Gender"],
+            "locale": v["Locale"],
+            "localeName": v["LocaleName"],
+            "personalities": v.get("VoiceTag", {}).get("VoicePersonalities", []),
+        }
+        for v in raw_voices
+        if v["Locale"].startswith("en-") and v.get("Status") == "GA"
+    ]
+    voices.sort(key=lambda v: (v["locale"], v["displayName"]))
+
+    _VOICES_CACHE = voices
+    _VOICES_CACHE_AT = now
+    logger.info("tts_voices_refreshed", count=len(voices))
+    return {"voices": voices}
+
+
 @router.post("/tts-dual-voice")
 async def text_to_speech_dual_voice_post(request: TTSDualVoiceRequest = Body(...)):
     async def audio_generator():
@@ -71,7 +134,7 @@ async def text_to_speech_dual_voice(
         logger.info("tts_start", segments=len(segments), text_length=len(text))
         t0 = time.perf_counter()
 
-        tasks = [collect_audio(seg_text, seg_voice) for seg_text, seg_voice in segments]
+        tasks = [_collect_audio_bounded(seg_text, seg_voice) for seg_text, seg_voice in segments]
         results = await asyncio.gather(*tasks)
 
         # If a dialogue segment produced no audio, fall back to narrator voice
@@ -80,7 +143,7 @@ async def text_to_speech_dual_voice(
         for i, ((seg_text, seg_voice), audio_bytes) in enumerate(zip(segments, results)):
             if not audio_bytes and seg_voice == dialogue_voice:
                 logger.warning("dialogue_fallback", text_preview=seg_text[:50])
-                fallback_tasks.append(collect_audio(seg_text, paragraph_voice))
+                fallback_tasks.append(_collect_audio_bounded(seg_text, paragraph_voice))
                 fallback_indices.append(i)
 
         if fallback_tasks:
