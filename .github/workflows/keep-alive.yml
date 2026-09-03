@@ -1,0 +1,23 @@
+name: Keep Backend Alive
+
+# Pings the deployed backend's health endpoint on a schedule so the free
+# Render instance doesn't spin down from inactivity (avoids cold starts on
+# the next real request). Safe to trigger manually too.
+
+on:
+  schedule:
+    # Every 5 minutes. Render free-tier instances spin down after ~15
+    # minutes idle, so this keeps it warm with margin to spare.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /health
+        run: |
+          curl --fail --silent --show-error \
+            --max-time 20 \
+            --retry 2 --retry-delay 5 \
+            "https://audiobook-python.onrender.com/health"
