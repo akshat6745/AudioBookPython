@@ -32,17 +32,17 @@ class UserRegisterRequest(BaseModel):
     username: str
     password: str
 
+class GoogleSignInRequest(BaseModel):
+    idToken: str
+
 class NovelProgress(BaseModel):
     novelName: str
     lastChapterRead: int
 
 class UserProgressRequest(BaseModel):
-    username: str
+    # No username field: the caller is identified by their access token.
     novelName: str
     lastChapterRead: int
-
-class UserProgressFetchRequest(BaseModel):
-    username: str
 
 class Chapter(BaseModel):
     number: int

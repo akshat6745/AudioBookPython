@@ -36,12 +36,17 @@ CREATE TABLE IF NOT EXISTS chapters (
 
 -- ── USERS ─────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS users (
-    id          TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
-    username    TEXT UNIQUE NOT NULL,
-    password    TEXT NOT NULL,                  -- bcrypt hashed
-    created_at  TEXT DEFAULT (datetime('now')),
-    updated_at  TEXT DEFAULT (datetime('now'))
+    id            TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
+    username      TEXT UNIQUE NOT NULL,
+    password      TEXT NOT NULL,                -- bcrypt hash, or '!nopassword' for Google-only accounts
+    google_sub    TEXT,                         -- Google's stable per-user id; NULL for password accounts
+    email         TEXT,
+    auth_provider TEXT NOT NULL DEFAULT 'password',   -- 'password' | 'google'
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now'))
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub);
 
 -- ── USER PROGRESS ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS user_progress (

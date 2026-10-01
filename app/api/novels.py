@@ -1,6 +1,7 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
 from bs4 import BeautifulSoup, Tag, NavigableString, Comment
+from app.api.deps import AuthenticatedUser, get_current_user
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
 from app.core.d1_client import get_d1_client
@@ -122,32 +123,29 @@ def extract_paragraphs_from_soup(soup: BeautifulSoup, chapter_title_text: str) -
     raise HTTPException(status_code=500, detail="Could not find chapter content")
 
 @router.get("/novels", response_model=List[NovelInfo])
-async def fetch_names(username: Optional[str] = None):
-    """Fetch novels the user has access to (their own + public)."""
+async def fetch_names(caller: AuthenticatedUser = Depends(get_current_user)):
+    """Fetch novels the caller has access to (their own + public).
+
+    The library is scoped to the verified token, not to a username supplied by
+    the caller — that parameter previously let anyone read anyone's library.
+    """
     try:
         d1 = get_d1_client()
+        username = caller.username
 
-        if username:
-            # Single round-trip: resolve user_id via subquery + fetch novels.
-            # If username doesn't exist, the subquery returns NULL and only public novels match.
-            rows = await d1.query(
-                "SELECT n.id, n.id AS slug, n.title, n.author, n.description, "
-                "n.total_chapters, n.is_public, up.updated_at AS last_read_date "
-                "FROM novels n "
-                "LEFT JOIN user_progress up "
-                "  ON up.novel_id = n.id "
-                " AND up.user_id = (SELECT id FROM users WHERE username = ?) "
-                "WHERE n.user_id = (SELECT id FROM users WHERE username = ?) "
-                "   OR n.is_public = 1 "
-                "ORDER BY up.updated_at DESC NULLS LAST, n.total_chapters DESC",
-                [username, username],
-            )
-        else:
-            # No user specified — show only public novels
-            rows = await d1.query(
-                "SELECT id, id AS slug, title, author, description, total_chapters, is_public "
-                "FROM novels WHERE is_public = 1 ORDER BY total_chapters DESC"
-            )
+        # Single round-trip: resolve user_id via subquery + fetch novels.
+        rows = await d1.query(
+            "SELECT n.id, n.id AS slug, n.title, n.author, n.description, "
+            "n.total_chapters, n.is_public, up.updated_at AS last_read_date "
+            "FROM novels n "
+            "LEFT JOIN user_progress up "
+            "  ON up.novel_id = n.id "
+            " AND up.user_id = (SELECT id FROM users WHERE username = ?) "
+            "WHERE n.user_id = (SELECT id FROM users WHERE username = ?) "
+            "   OR n.is_public = 1 "
+            "ORDER BY up.updated_at DESC NULLS LAST, n.total_chapters DESC",
+            [username, username],
+        )
 
         novels = [
             NovelInfo(

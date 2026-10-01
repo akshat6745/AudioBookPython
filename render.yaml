@@ -17,3 +17,20 @@ services:
         sync: false
       - key: SUPABASE_KEY
         sync: false
+      # Web OAuth client ID — the audience Android mints ID tokens for.
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      # Migration escape hatch, managed from the dashboard (sync: false) so
+      # flipping it doesn't need a redeploy and isn't overwritten by this
+      # file. Set it TRUE before the first deploy of bcrypt verification —
+      # existing rows are still plaintext at that point and login fails
+      # closed without it — then set it back to FALSE once
+      # scripts/hash_existing_passwords.py has run. Defaults to false in
+      # app/core/settings.py if unset.
+      - key: ALLOW_PLAINTEXT_LOGIN
+        sync: false
+      # Access-token signing secret, set in the dashboard. Generate with:
+      #   python -c "import secrets; print(secrets.token_urlsafe(48))"
+      # Rotating it invalidates every outstanding token (global logout).
+      - key: JWT_SECRET
+        sync: false

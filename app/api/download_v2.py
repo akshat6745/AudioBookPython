@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
+from app.api.deps import AuthenticatedUser, get_current_user
 from app.api.novels import fetch_chapter
 from app.api.tts import text_to_speech_dual_voice
 import json
@@ -248,7 +249,10 @@ async def process_chapter_download(
         )
 
 @router.delete("/download/{download_id}")
-async def cleanup_download(download_id: str):
+async def cleanup_download(
+    download_id: str,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """Clean up download files and status."""
     if download_id not in download_status:
         raise HTTPException(status_code=404, detail="Download ID not found")
@@ -270,9 +274,16 @@ async def cleanup_download(download_id: str):
         logger.error("Error cleaning up download", download_id=download_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Error cleaning up: {str(e)}")
 
-@router.get("/download/cleanup/old")
-async def cleanup_old_downloads(max_age_hours: int = 24):
-    """Clean up downloads older than specified hours."""
+@router.delete("/download/cleanup/old")
+async def cleanup_old_downloads(
+    max_age_hours: int = 24,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
+    """Clean up downloads older than specified hours.
+
+    DELETE rather than GET — it destroys data, so it must not be reachable by
+    anything that follows links or prefetches.
+    """
     try:
         cutoff_time = datetime.datetime.now() - datetime.timedelta(hours=max_age_hours)
         cleaned_count = 0

@@ -73,10 +73,18 @@ class NormalizeSlashesMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(NormalizeSlashesMiddleware)
+# Browser clients are pinned to known origins. Native mobile clients send no
+# Origin header, so CORS doesn't apply to them. allow_credentials is False
+# because we authenticate with a Bearer header rather than cookies — and
+# "*" combined with credentials is invalid per spec, which is what this was.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[
+        "https://audiobook-web.netlify.app",
+        "http://localhost:3000",
+        "http://localhost:5000",
+    ],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

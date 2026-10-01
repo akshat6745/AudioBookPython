@@ -1,6 +1,7 @@
-from fastapi import APIRouter, UploadFile, HTTPException, Form
+from fastapi import APIRouter, UploadFile, HTTPException, Depends
 from typing import Optional
 from fastapi.responses import Response
+from app.api.deps import AuthenticatedUser, get_current_user
 from app.models.schemas import NovelUploadResponse, ImageInfo, NovelImagesResponse
 from app.services.epub_parser import parse_epub_content
 from app.core.supabase_client import get_supabase_client   # still used for epub_images only
@@ -52,7 +53,10 @@ def calculate_word_count(content: list) -> int:
 # ── EPUB Upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload-epub", response_model=NovelUploadResponse)
-async def upload_epub(file: UploadFile, username: Optional[str] = Form(None)):
+async def upload_epub(
+    file: UploadFile,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Upload and parse an EPUB file.
     Novel metadata → Cloudflare D1
@@ -73,14 +77,16 @@ async def upload_epub(file: UploadFile, username: Optional[str] = Form(None)):
         d1   = get_d1_client()
         slug = generate_slug(novel.title)
 
-        # ── Resolve user_id from username ─────────────────────────────────────
-        user_id = None
-        if username:
-            user_rows = await d1.query(
-                "SELECT id FROM users WHERE username = ?", [username]
-            )
-            if user_rows:
-                user_id = user_rows[0]["id"]
+        # ── Resolve user_id from the authenticated caller ─────────────────────
+        # Looked up rather than taken from the token's `sub`: this becomes a
+        # novels.user_id foreign key, and D1 does not enforce FKs, so a stale
+        # id would silently create an orphaned novel.
+        user_rows = await d1.query(
+            "SELECT id FROM users WHERE username = ?", [caller.username]
+        )
+        if not user_rows:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        user_id = user_rows[0]["id"]
 
         # ── Check if novel already exists in D1 ───────────────────────────────
         existing = await d1.query(
@@ -350,7 +356,7 @@ async def get_novel_cover(novel_id: str):
 
 
 @router.post("/generate-all-covers")
-async def generate_all_covers():
+async def generate_all_covers(caller: AuthenticatedUser = Depends(get_current_user)):
     """Generate and cache cover images for all novels that don't have one yet."""
     try:
         d1 = get_d1_client()
@@ -384,7 +390,11 @@ async def generate_all_covers():
 
 
 @router.put("/novel/{novel_id}/cover")
-async def upload_novel_cover(novel_id: str, file: UploadFile):
+async def upload_novel_cover(
+    novel_id: str,
+    file: UploadFile,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """Upload a custom cover image for a novel. Accepts JPEG/PNG."""
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="File must be an image (JPEG/PNG)")
@@ -422,7 +432,10 @@ async def upload_novel_cover(novel_id: str, file: UploadFile):
 
 
 @router.post("/upload-covers")
-async def bulk_upload_covers(files: list[UploadFile]):
+async def bulk_upload_covers(
+    files: list[UploadFile],
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Bulk upload cover images. Each file must be named {novel-slug}.jpg or {novel-slug}.png.
     The filename (without extension) is used to match the novel.
