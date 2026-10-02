@@ -10,6 +10,7 @@ from app.core.passwords import (
     MIN_PASSWORD_LENGTH,
     NO_PASSWORD_SENTINEL,
     PasswordPolicyError,
+    hash_existing_password,
     hash_password,
     is_hashed,
     verify_legacy_plaintext,
@@ -73,6 +74,18 @@ def test_overlong_input_does_not_raise_on_verify():
     """An over-length login attempt is a failed login, not a 500."""
     stored = hash_password("correct horse")
     assert verify_password("a" * 200, stored) is False
+
+
+def test_existing_short_password_can_still_be_migrated():
+    """The length policy is for new passwords; migrating must not lock anyone out."""
+    stored = hash_existing_password("abc")
+    assert stored.startswith("$2")
+    assert verify_password("abc", stored) is True
+
+
+def test_existing_password_over_bcrypt_limit_is_still_refused():
+    with pytest.raises(PasswordPolicyError):
+        hash_existing_password("a" * (MAX_PASSWORD_BYTES + 1))
 
 
 def test_is_hashed():

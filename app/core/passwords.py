@@ -46,6 +46,22 @@ def hash_password(plaintext: str) -> str:
     return bcrypt.hashpw(encoded, bcrypt.gensalt(BCRYPT_ROUNDS)).decode("utf-8")
 
 
+def hash_existing_password(plaintext: str) -> str:
+    """Hash a password that a user *already has*, during migration.
+
+    Deliberately skips the minimum-length policy: that rule is for choosing
+    new passwords, and refusing to hash an existing short one would lock its
+    owner out. bcrypt's 72-byte ceiling still applies, because it can't be
+    hashed faithfully past that.
+    """
+    encoded = plaintext.encode("utf-8")
+    if len(encoded) > MAX_PASSWORD_BYTES:
+        raise PasswordPolicyError(
+            f"Password must be at most {MAX_PASSWORD_BYTES} bytes"
+        )
+    return bcrypt.hashpw(encoded, bcrypt.gensalt(BCRYPT_ROUNDS)).decode("utf-8")
+
+
 def is_hashed(stored: object) -> bool:
     """Whether a stored value is a bcrypt hash we can verify against."""
     return isinstance(stored, str) and stored.startswith("$2")

@@ -34,7 +34,8 @@ from app.core.d1_client import get_d1_client  # noqa: E402
 from app.core.passwords import (  # noqa: E402
     MAX_PASSWORD_BYTES,
     NO_PASSWORD_SENTINEL,
-    hash_password,
+    PasswordPolicyError,
+    hash_existing_password,
     is_hashed,
 )
 
@@ -75,6 +76,16 @@ async def migrate(dry_run: bool) -> int:
             failed += 1
             continue
 
+        # Hash in dry-run mode too, so a dry run exercises everything except
+        # the write. Existing passwords are hashed without the new-password
+        # length policy — refusing a short one would lock its owner out.
+        try:
+            new_hash = hash_existing_password(stored)
+        except PasswordPolicyError:
+            print(f"  [{uname}] !! cannot be hashed — needs a manual reset")
+            failed += 1
+            continue
+
         if dry_run:
             print(f"  [{uname}] would hash")
             hashed += 1
@@ -86,7 +97,7 @@ async def migrate(dry_run: bool) -> int:
         meta = await d1.execute(
             "UPDATE users SET password = ?, updated_at = datetime('now') "
             "WHERE id = ? AND password = ?",
-            [hash_password(stored), uid, stored],
+            [new_hash, uid, stored],
         )
         changed = next(
             (
