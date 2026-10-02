@@ -1,0 +1,55 @@
+# Production stack for the single e2-micro VM (see DEPLOY_GCE.md).
+# Unlike docker-compose.yml, this doesn't mount the source over the image,
+# keeps the API off the public interface (Caddy is the only way in), and caps
+# log size so the 30 GB disk can't fill up.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  api:
+    build: .
+    env_file: .env
+    # Pinned over .env so local-dev values can't leak into production;
+    # PORT must stay 8080 to match the Caddyfile.
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=False
+      - PORT=8080
+    expose:
+      - "8080"
+    restart: always
+    logging: *logging
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 700M
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?set DOMAIN (scripts/gce/deploy.sh does this)}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: always
+    logging: *logging
+
+volumes:
+  # Holds the TLS certificates — keep it so redeploys don't re-request them.
+  caddy_data:
+  caddy_config:

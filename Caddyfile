@@ -1,0 +1,6 @@
+{$DOMAIN} {
+	reverse_proxy api:8080 {
+		# Flush immediately so streamed TTS audio isn't held in a buffer.
+		flush_interval -1
+	}
+}

@@ -30,7 +30,15 @@ var/
 .env
 .env.example
 .env.sample
-serviceAccountFirebase.json
+*ServiceAccount*.json
+
+# Local-only artifacts (virtualenvs, Wrangler cache, books, chapter dumps)
+.venv/
+.testEnv/
+.wrangler/
+.pytest_cache/
+*.epub
+chapter_*/
 
 # Logs
 *.log
