@@ -6,7 +6,8 @@ from app.models.schemas import NovelUploadResponse, ImageInfo, NovelImagesRespon
 from app.services.epub_parser import parse_epub_content
 from app.core.supabase_client import get_supabase_client   # still used for epub_images only
 from app.core.d1_client import get_d1_client
-from app.services.cloudflare_service import upload_chapter_text_to_r2, _r2_client, _r2_bucket
+from app.services.cloudflare_service import _r2_client, _r2_bucket
+from app.services.novel_store import cover_r2_key, store_novel
 from app.services.cover_generator import generate_cover
 from botocore.exceptions import ClientError
 import re
@@ -38,18 +39,6 @@ def _resolve_supabase_novel_id(supabase, novel_id: str) -> Optional[str]:
     return None
 
 
-def generate_slug(title: str) -> str:
-    """Generate a URL-friendly slug from a title."""
-    slug = title.lower()
-    slug = re.sub(r'[^a-z0-9]+', '-', slug)
-    slug = slug.strip('-')
-    return slug[:200] if len(slug) > 200 else slug
-
-
-def calculate_word_count(content: list) -> int:
-    return sum(len(p.split()) for p in content)
-
-
 # ── EPUB Upload ───────────────────────────────────────────────────────────────
 
 @router.post("/upload-epub", response_model=NovelUploadResponse)
@@ -74,13 +63,11 @@ async def upload_epub(
             None, parse_epub_content, content
         )
 
-        d1   = get_d1_client()
-        slug = generate_slug(novel.title)
-
         # ── Resolve user_id from the authenticated caller ─────────────────────
         # Looked up rather than taken from the token's `sub`: this becomes a
         # novels.user_id foreign key, and D1 does not enforce FKs, so a stale
         # id would silently create an orphaned novel.
+        d1 = get_d1_client()
         user_rows = await d1.query(
             "SELECT id FROM users WHERE username = ?", [caller.username]
         )
@@ -88,89 +75,16 @@ async def upload_epub(
             raise HTTPException(status_code=401, detail="Not authenticated")
         user_id = user_rows[0]["id"]
 
-        # ── Check if novel already exists in D1 ───────────────────────────────
-        existing = await d1.query(
-            "SELECT id, total_chapters FROM novels WHERE id = ?", [slug]
+        slug = await store_novel(
+            novel, chapters, cover_image, user_id=user_id, is_public=False
         )
-
-        if existing and existing[0].get("total_chapters", 0) > 0:
+        if slug is None:
             return NovelUploadResponse(
                 title=novel.title,
                 author=novel.author,
                 chapterCount=len(chapters),
                 message="Novel already exists in the database"
             )
-
-        # Make slug unique if collision
-        base_slug = slug
-        counter = 1
-        while True:
-            check = await d1.query("SELECT id FROM novels WHERE id = ?", [slug])
-            if not check:
-                break
-            slug = f"{base_slug}-{counter}"
-            counter += 1
-
-        # ── Insert novel into D1 ──────────────────────────────────────────────
-        await d1.execute(
-            """
-            INSERT OR REPLACE INTO novels
-                (id, title, author, language, total_chapters, user_id, created_at, updated_at)
-            VALUES (?, ?, ?, 'en', ?, ?, datetime('now'), datetime('now'))
-            """,
-            [slug, novel.title, novel.author or "Unknown", len(chapters), user_id],
-        )
-        logger.info("Inserted novel into D1", slug=slug, chapters=len(chapters))
-
-        # ── Upload each chapter: text → R2, metadata → D1 ────────────────────
-        # Bound concurrency: R2 uploads are sync (boto3) and run in the executor
-        # thread pool, D1 inserts are async HTTP. Cap at 20 to avoid exhausting
-        # either pool while still giving a large speedup over serial.
-        chapter_sem = asyncio.Semaphore(20)
-        loop = asyncio.get_running_loop()
-
-        async def upload_chapter(chapter):
-            chap_num     = chapter["chapterNumber"]
-            chap_title   = chapter.get("chapterTitle", f"Chapter {chap_num}")
-            chap_content = chapter.get("content", [])
-            word_count   = calculate_word_count(chap_content)
-            text         = "\n\n".join(p.strip() for p in chap_content if p.strip())
-
-            async with chapter_sem:
-                r2_key = await loop.run_in_executor(
-                    None, upload_chapter_text_to_r2, slug, chap_num, text
-                )
-                await d1.execute(
-                    """
-                    INSERT OR REPLACE INTO chapters
-                        (id, novel_id, chapter_number, title,
-                         r2_content_path, word_count, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-                    """,
-                    [f"{slug}_ch_{chap_num}", slug, chap_num, chap_title, r2_key, word_count],
-                )
-
-        await asyncio.gather(*(upload_chapter(c) for c in chapters))
-
-        logger.info("Uploaded chapters to R2 + D1", slug=slug, count=len(chapters))
-
-        # ── Upload cover image to R2 if extracted from EPUB ──────────────
-        if cover_image:
-            try:
-                r2_key = _cover_r2_key(slug)
-                _r2_client().put_object(
-                    Bucket=_r2_bucket(),
-                    Key=r2_key,
-                    Body=cover_image,
-                    ContentType="image/jpeg",
-                )
-                await d1.execute(
-                    "UPDATE novels SET cover_url = ? WHERE id = ?",
-                    [r2_key, slug],
-                )
-                logger.info("Uploaded EPUB cover to R2", novel=slug)
-            except Exception as cover_err:
-                logger.warning("Failed to upload EPUB cover", error=str(cover_err))
 
         # ── Images still go to Supabase (binary blobs) ───────────────────────
         if images:
@@ -286,10 +200,6 @@ async def get_novel_images_list(novel_id: str):
 
 # ── Novel Cover (generated + cached in R2) ────────────────────────────────────
 
-def _cover_r2_key(novel_slug: str) -> str:
-    return f"covers/{novel_slug}.png"
-
-
 @router.get("/novel/{novel_id}/cover")
 async def get_novel_cover(novel_id: str):
     """
@@ -297,7 +207,7 @@ async def get_novel_cover(novel_id: str):
     If one exists in R2, serve it. Otherwise generate it, upload to R2, and serve.
     """
     try:
-        r2_key = _cover_r2_key(novel_id)
+        r2_key = cover_r2_key(novel_id)
 
         # Try serving from R2 cache
         try:
@@ -367,7 +277,7 @@ async def generate_all_covers(caller: AuthenticatedUser = Depends(get_current_us
         generated = []
         for row in rows:
             slug = row["id"]
-            r2_key = _cover_r2_key(slug)
+            r2_key = cover_r2_key(slug)
 
             image_bytes = generate_cover(row["title"], row.get("author"))
             _r2_client().put_object(
@@ -406,7 +316,7 @@ async def upload_novel_cover(
             raise HTTPException(status_code=404, detail="Novel not found")
 
         image_bytes = await file.read()
-        r2_key = _cover_r2_key(novel_id)
+        r2_key = cover_r2_key(novel_id)
 
         _r2_client().put_object(
             Bucket=_r2_bucket(),
@@ -455,7 +365,7 @@ async def bulk_upload_covers(
                 continue
 
             image_bytes = await file.read()
-            r2_key = _cover_r2_key(slug)
+            r2_key = cover_r2_key(slug)
 
             _r2_client().put_object(
                 Bucket=_r2_bucket(),

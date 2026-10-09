@@ -128,6 +128,12 @@ async def fetch_names(caller: AuthenticatedUser = Depends(get_current_user)):
 
     The library is scoped to the verified token, not to a username supplied by
     the caller — that parameter previously let anyone read anyone's library.
+
+    Ordered by recent activity: whichever is later of the caller's last read
+    and the novel being added, so new novels surface at the top just like the
+    last-read one. Timestamps are compared via julianday() because they are
+    stored in mixed formats ('YYYY-MM-DD HH:MM:SS' and ISO 8601 with 'T' and a
+    UTC offset), which don't order correctly as plain strings.
     """
     try:
         d1 = get_d1_client()
@@ -143,7 +149,9 @@ async def fetch_names(caller: AuthenticatedUser = Depends(get_current_user)):
             " AND up.user_id = (SELECT id FROM users WHERE username = ?) "
             "WHERE n.user_id = (SELECT id FROM users WHERE username = ?) "
             "   OR n.is_public = 1 "
-            "ORDER BY up.updated_at DESC NULLS LAST, n.total_chapters DESC",
+            "ORDER BY MAX(COALESCE(julianday(up.updated_at), 0), "
+            "             COALESCE(julianday(n.created_at), 0)) DESC, "
+            "         n.total_chapters DESC",
             [username, username],
         )
 
