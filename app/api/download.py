@@ -1,5 +1,8 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
+from app.api.deps import AuthenticatedUser, get_current_user
+from app.core.rate_limit import rate_limit
+from app.core.settings import settings
 from app.api.novels import fetch_chapter
 from app.api.tts import generate_audio, text_to_speech_dual_voice
 from stream_zip import async_stream_zip, ZIP_32
@@ -13,18 +16,27 @@ import io
 logger = structlog.get_logger()
 router = APIRouter()
 
+_download_rate_limit = rate_limit(
+    "download",
+    limit=settings.DOWNLOAD_RATE_LIMIT_REQUESTS,
+    window_seconds=settings.DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
+)
+
 # In-memory store for progress. In production, use Redis.
 progress_store: Dict[str, Dict[str, Any]] = {}
 
 @router.get("/download/progress/{progress_id}")
-async def get_download_progress(progress_id: str):
+async def get_download_progress(
+    progress_id: str,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """
     Get the progress of a download by its ID.
     """
     progress = progress_store.get(progress_id)
-    if not progress:
+    if not progress or progress.get("_owner_id") != caller.id:
         raise HTTPException(status_code=404, detail="Progress ID not found")
-    return progress
+    return {key: value for key, value in progress.items() if not key.startswith("_")}
 
 @router.get("/download-chapter/{novel_name}/{chapter_number}")
 async def download_chapter(
@@ -32,12 +44,17 @@ async def download_chapter(
     chapter_number: int,
     voice: str = Query(..., description="Voice for narration"),
     dialogue_voice: str = Query(..., description="Voice for dialogue"),
-    progress_id: str = Query(None, description="Unique ID to track progress")
+    progress_id: str = Query(None, description="Unique ID to track progress"),
+    caller: AuthenticatedUser = Depends(_download_rate_limit),
 ):
     try:
         # Initialize progress if ID provided
         if progress_id:
+            existing = progress_store.get(progress_id)
+            if existing and existing.get("_owner_id") != caller.id:
+                raise HTTPException(status_code=409, detail="Progress ID already exists")
             progress_store[progress_id] = {
+                "_owner_id": caller.id,
                 "status": "initializing",
                 "total": 0,
                 "current": 0,

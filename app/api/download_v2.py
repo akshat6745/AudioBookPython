@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 from app.api.deps import AuthenticatedUser, get_current_user
+from app.core.rate_limit import rate_limit
+from app.core.settings import settings
 from app.api.novels import fetch_chapter
 from app.api.tts import text_to_speech_dual_voice
 import json
@@ -16,6 +18,12 @@ from pathlib import Path
 
 logger = structlog.get_logger()
 router = APIRouter()
+
+_download_rate_limit = rate_limit(
+    "download",
+    limit=settings.DOWNLOAD_RATE_LIMIT_REQUESTS,
+    window_seconds=settings.DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 # Configuration
 DOWNLOADS_DIR = Path("downloads")
@@ -44,8 +52,21 @@ class DownloadStatus(BaseModel):
     error_message: Optional[str] = None
     files: Optional[Dict[str, Any]] = None
 
+
+def _owned_download(download_id: str, caller: AuthenticatedUser) -> Dict[str, Any]:
+    status = download_status.get(download_id)
+    if not status or status.get("_owner_id") != caller.id:
+        # Do not reveal whether another user owns this opaque identifier.
+        raise HTTPException(status_code=404, detail="Download ID not found")
+    return status
+
+
 @router.post("/download/chapter", response_model=DownloadResponse)
-async def start_chapter_download(request: DownloadRequest, background_tasks: BackgroundTasks):
+async def start_chapter_download(
+    request: DownloadRequest,
+    background_tasks: BackgroundTasks,
+    caller: AuthenticatedUser = Depends(_download_rate_limit),
+):
     """Start downloading a chapter with all its audio files."""
     try:
         # Generate unique download ID
@@ -53,6 +74,7 @@ async def start_chapter_download(request: DownloadRequest, background_tasks: Bac
 
         # Initialize download status
         download_status[download_id] = {
+            "_owner_id": caller.id,
             "status": "pending",
             "progress": 0,
             "total_files": 0,
@@ -85,12 +107,12 @@ async def start_chapter_download(request: DownloadRequest, background_tasks: Bac
         raise HTTPException(status_code=500, detail=f"Error starting download: {str(e)}")
 
 @router.get("/download/status/{download_id}", response_model=DownloadStatus)
-async def get_download_status(download_id: str):
+async def get_download_status(
+    download_id: str,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """Get the current status of a download."""
-    if download_id not in download_status:
-        raise HTTPException(status_code=404, detail="Download ID not found")
-
-    status_data = download_status[download_id]
+    status_data = _owned_download(download_id, caller)
 
     return DownloadStatus(
         download_id=download_id,
@@ -103,10 +125,13 @@ async def get_download_status(download_id: str):
     )
 
 @router.get("/download/file/{download_id}/{filename}")
-async def download_file(download_id: str, filename: str):
+async def download_file(
+    download_id: str,
+    filename: str,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """Serve individual download files."""
-    if download_id not in download_status:
-        raise HTTPException(status_code=404, detail="Download ID not found")
+    _owned_download(download_id, caller)
 
     # Sanitize filename to prevent directory traversal
     safe_filename = filename.replace("..", "").replace("/", "").replace("\\", "")
@@ -254,8 +279,7 @@ async def cleanup_download(
     caller: AuthenticatedUser = Depends(get_current_user),
 ):
     """Clean up download files and status."""
-    if download_id not in download_status:
-        raise HTTPException(status_code=404, detail="Download ID not found")
+    _owned_download(download_id, caller)
 
     try:
         # Remove files
@@ -291,6 +315,8 @@ async def cleanup_old_downloads(
         # Clean up status entries
         to_remove = []
         for download_id, status_data in download_status.items():
+            if status_data.get("_owner_id") != caller.id:
+                continue
             created_at = datetime.datetime.fromisoformat(status_data.get("created_at", ""))
             if created_at < cutoff_time:
                 to_remove.append(download_id)
