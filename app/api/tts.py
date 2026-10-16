@@ -1,5 +1,8 @@
-from fastapi import APIRouter, HTTPException, Body
+from fastapi import APIRouter, HTTPException, Body, Depends
 from fastapi.responses import StreamingResponse
+from app.api.deps import AuthenticatedUser, get_current_user
+from app.core.rate_limit import rate_limit
+from app.core.settings import settings
 from app.models.schemas import TTSDualVoiceRequest
 import edge_tts
 import re
@@ -10,6 +13,12 @@ import structlog
 logger = structlog.get_logger()
 
 router = APIRouter()
+
+_tts_rate_limit = rate_limit(
+    "tts",
+    limit=settings.TTS_RATE_LIMIT_REQUESTS,
+    window_seconds=settings.TTS_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 # Cap concurrent edge-tts segment generations across the whole process.
 # Why: edge-tts is rate-limited and unbounded gather() over a long chapter
@@ -32,7 +41,9 @@ _VOICES_CACHE_TTL_S = 24 * 60 * 60
 
 
 @router.get("/tts-voices")
-async def list_tts_voices():
+async def list_tts_voices(
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
     """English-locale edge-tts voices, shaped for the app's voice picker.
 
     Mirrors the fields the on-device Kokoro picker already surfaces (name,
@@ -75,7 +86,10 @@ async def list_tts_voices():
 
 
 @router.post("/tts-dual-voice")
-async def text_to_speech_dual_voice_post(request: TTSDualVoiceRequest = Body(...)):
+async def text_to_speech_dual_voice_post(
+    request: TTSDualVoiceRequest = Body(...),
+    caller: AuthenticatedUser = Depends(_tts_rate_limit),
+):
     async def audio_generator():
         async for chunk in text_to_speech_dual_voice(request.text, request.paragraphVoice, request.dialogueVoice):
             yield chunk

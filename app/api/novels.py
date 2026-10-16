@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List, Optional
 from bs4 import BeautifulSoup, Tag, NavigableString, Comment
 from app.api.deps import AuthenticatedUser, get_current_user
+from app.core.rate_limit import rate_limit
+from app.core.settings import settings
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
 from app.core.d1_client import get_d1_client
@@ -16,6 +18,12 @@ import structlog
 
 router = APIRouter()
 logger = structlog.get_logger()
+
+_tts_rate_limit = rate_limit(
+    "tts",
+    limit=settings.TTS_RATE_LIMIT_REQUESTS,
+    window_seconds=settings.TTS_RATE_LIMIT_WINDOW_SECONDS,
+)
 
 session = None  # This will be set by the main app
 
@@ -284,7 +292,13 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
 
 
 @router.get("/novel-with-tts")
-async def novel_with_tts(novelName: str, chapterNumber: int, voice: str, dialogueVoice: str):
+async def novel_with_tts(
+    novelName: str,
+    chapterNumber: int,
+    voice: str,
+    dialogueVoice: str,
+    caller: AuthenticatedUser = Depends(_tts_rate_limit),
+):
     try:
         chapter = await fetch_chapter(chapterNumber, novelName)
         paragraphs    = chapter.get("content", [])

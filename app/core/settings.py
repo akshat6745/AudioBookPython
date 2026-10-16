@@ -52,6 +52,10 @@ class Settings(BaseSettings):
 
     # TTS concurrency
     TTS_MAX_CONCURRENT: int = 10
+    TTS_RATE_LIMIT_REQUESTS: int = 30
+    TTS_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    DOWNLOAD_RATE_LIMIT_REQUESTS: int = 5
+    DOWNLOAD_RATE_LIMIT_WINDOW_SECONDS: int = 3600
     
     @property
     def is_local(self) -> bool:
