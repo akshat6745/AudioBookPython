@@ -1,0 +1,6 @@
+{
+  "run": false,
+  "novels": ["the-shining"],
+  "chapters": "1-3",
+  "retry_held": false
+}
