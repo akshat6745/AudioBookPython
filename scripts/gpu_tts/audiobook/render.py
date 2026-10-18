@@ -143,7 +143,9 @@ def render(tts, novel: str, ch: int, variant: str, title: str, ps: list[str], re
     while pending:
         width = ramp.workers if ramp else workers
         probing = ramp is not None and not ramp.settled
-        batch = pending[: max(1, width * 2)] if probing else pending
+        # Small waves are dominated by paragraph length and fixed request overhead.
+        # Use at least 16 real paragraphs so adjacent widths are comparable.
+        batch = pending[: max(16, width * 2)] if probing else pending
         pending = pending[len(batch):]
         window = ramp.measure() if probing else None
         if window:

@@ -1,8 +1,8 @@
-"""Modal L4 render. Concurrency rises while real chapter audio is produced. Whisper stays on the Mac.
+"""Modal H100 render. Concurrency rises while real chapter audio is produced. Whisper stays on the Mac.
 
 The Cloudflare values come from the Modal secret `cloudflare-audiobook`. GitHub Actions starts:
 
-  modal run --detach modal_app.py::render_l4 --novel=the-shining
+  modal run --detach modal_app.py::render_h100 --novel=the-shining
 
 Progress is written to R2 at ml/emotion-2026-10-10/render_runs/<novel>-adaptive.json.
 A rerun skips chapters whose manifest is already in R2.
@@ -28,9 +28,9 @@ image = (
 app = modal.App("audiobook-render", image=image)
 
 
-@app.function(gpu="L4", cpu=8, memory=32768, timeout=24 * 3600, secrets=[SECRET], volumes={CACHE: VOLUME})
-def render_l4(novel: str = "the-shining", chapters: str = "") -> dict:
-    os.environ["MODAL_GPU"] = "L4"
+@app.function(gpu="H100", cpu=8, memory=32768, timeout=24 * 3600, secrets=[SECRET], volumes={CACHE: VOLUME})
+def render_h100(novel: str = "the-shining", chapters: str = "") -> dict:
+    os.environ["MODAL_GPU"] = "H100"
     sys.path[:0] = [f"{GPU_TTS}/audiobook", GPU_TTS]
     import modal_bench
 

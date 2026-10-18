@@ -17,32 +17,25 @@ from pathlib import Path
 import cloud_render as cr
 import gpu_library_worker as gw
 
-CEILING = 128
+CEILING = 16
 
 
 def next_concurrency(current: int, util: float | None, x_realtime: float, previous: dict | None,
                      errors: int, clips: int, vram_pct: float | None, ceiling: int = CEILING) -> tuple[int, bool]:
     """Return (concurrency for the next wave, settled).
 
-    Below 60% utilization, double. From 60% to 80%, add 8. From 80% to 90%, add 4.
-    A step that loses throughput, a full GPU, errors, or high VRAM locks the width.
+    Sweep 2, 4, 8, 16 and stop only when measured audio throughput falls. SGLang
+    reserves most VRAM for its KV cache and an autoregressive decode can report
+    near-100% GPU utilization at batch 1, so neither metric is a saturation signal.
+    They remain in the trace for diagnosis.
     """
     if clips and errors > clips // 2:
-        return max(1, current // 2), True
-    if vram_pct is not None and vram_pct >= 92:
-        return max(1, current // 2), True
+        return previous["concurrency"] if previous else max(1, current // 2), True
     if previous and x_realtime < 0.95 * previous["x_realtime"]:
         return previous["concurrency"], True
-    if util is not None and util >= 90:
-        return current, True
     if current >= ceiling:
         return current, True
-    if util is None or util < 60:
-        nxt = min(ceiling, current * 2)
-    elif util < 80:
-        nxt = min(ceiling, current + 8)
-    else:
-        nxt = min(ceiling, current + 4)
+    nxt = min(ceiling, current * 2)
     return nxt, nxt == current
 
 

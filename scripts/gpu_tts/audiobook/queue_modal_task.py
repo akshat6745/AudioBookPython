@@ -7,13 +7,13 @@ import json
 import subprocess
 import sys
 
-FUNCTIONS = {"L4": "render_l4"}
+FUNCTIONS = {"H100": "render_h100"}
 
 
 def command(request: dict) -> list[str]:
-    gpu = request.get("gpu") or "L4"
+    gpu = request.get("gpu") or "H100"
     if gpu not in FUNCTIONS:
-        raise SystemExit(f"gpu must be L4 for this render, got {gpu!r}")
+        raise SystemExit(f"gpu must be H100 for this render, got {gpu!r}")
     novel = (request.get("novels") or ["the-shining"])[0]
     cmd = ["modal", "run", "--detach", f"modal_app.py::{FUNCTIONS[gpu]}", f"--novel={novel}"]
     chapters = str(request.get("chapters") or "").strip()

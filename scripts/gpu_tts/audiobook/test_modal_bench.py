@@ -13,32 +13,32 @@ import render
 SR = 24000
 
 
-def test_low_utilization_doubles_and_the_middle_band_adds_eight():
+def test_sweep_doubles_despite_misleading_gpu_metrics():
     nxt, settled = modal_bench.next_concurrency(2, 30, 4.0, None, 0, 4, 40)
     assert (nxt, settled) == (4, False)
-    nxt, settled = modal_bench.next_concurrency(16, 70, 10.0, {"concurrency": 8, "x_realtime": 8.0}, 0, 16, 50)
-    assert (nxt, settled) == (24, False)
+    nxt, settled = modal_bench.next_concurrency(4, 99, 8.0, {"concurrency": 2, "x_realtime": 4.0}, 0, 16, 98)
+    assert (nxt, settled) == (8, False)
 
 
-def test_full_gpu_or_a_slower_step_locks_the_previous_width():
-    nxt, settled = modal_bench.next_concurrency(32, 91, 20.0, {"concurrency": 24, "x_realtime": 18.0}, 0, 32, 60)
-    assert (nxt, settled) == (32, True)
-    nxt, settled = modal_bench.next_concurrency(32, 50, 10.0, {"concurrency": 16, "x_realtime": 18.0}, 0, 32, 60)
+def test_ceiling_or_a_slower_step_locks_the_width():
+    nxt, settled = modal_bench.next_concurrency(16, 91, 20.0, {"concurrency": 8, "x_realtime": 18.0}, 0, 32, 98)
     assert (nxt, settled) == (16, True)
+    nxt, settled = modal_bench.next_concurrency(8, 50, 10.0, {"concurrency": 4, "x_realtime": 18.0}, 0, 32, 60)
+    assert (nxt, settled) == (4, True)
 
 
-def test_errors_and_vram_back_off_and_stop():
+def test_errors_back_off_but_reserved_vram_does_not_stop_the_sweep():
     assert modal_bench.next_concurrency(16, 40, 1.0, None, 3, 4, 50) == (8, True)
-    assert modal_bench.next_concurrency(16, 40, 8.0, None, 0, 4, 95) == (8, True)
-    assert modal_bench.next_concurrency(128, 20, 8.0, None, 0, 4, 50) == (128, True)
+    assert modal_bench.next_concurrency(4, 99, 8.0, None, 0, 4, 98) == (8, False)
+    assert modal_bench.next_concurrency(16, 20, 8.0, None, 0, 4, 50) == (16, True)
 
 
 def test_ramp_trace_settles_when_the_gpu_is_full():
     ramp = modal_bench.Ramp()
     ramp.observe(8, 2, errors=0, clips=4, sample={"util": 40, "vram_pct": 30})
     assert ramp.workers == 4 and not ramp.settled
-    ramp.observe(20, 2, errors=0, clips=8, sample={"util": 93, "vram_pct": 70})
-    assert ramp.workers == 4 and ramp.settled
+    ramp.observe(20, 2, errors=0, clips=8, sample={"util": 93, "vram_pct": 98})
+    assert ramp.workers == 8 and not ramp.settled
     assert [row["concurrency"] for row in ramp.trace] == [2, 4]
 
 
@@ -72,14 +72,14 @@ def test_manifest_is_marked_pending_without_a_whisper_check(tmp_path):
     assert manifest["title"]["file"] == "title.opus"
 
 
-def test_queue_command_renders_the_whole_novel_on_l4():
-    cmd = queue_modal_task.command({"gpu": "L4", "chapters": "", "novels": ["the-shining"]})
-    assert cmd == ["modal", "run", "--detach", "modal_app.py::render_l4", "--novel=the-shining"]
+def test_queue_command_renders_the_whole_novel_on_h100():
+    cmd = queue_modal_task.command({"gpu": "H100", "chapters": "", "novels": ["the-shining"]})
+    assert cmd == ["modal", "run", "--detach", "modal_app.py::render_h100", "--novel=the-shining"]
 
 
 def test_request_file_stays_disarmed():
     request = json.loads(Path(__file__).parents[3].joinpath("render_request.json").read_text())
     assert request["run"] is False
-    assert request["gpu"] == "L4"
+    assert request["gpu"] == "H100"
     assert request["chapters"] == ""
     assert request["novels"] == ["the-shining"]

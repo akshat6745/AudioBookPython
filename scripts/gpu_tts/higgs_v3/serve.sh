@@ -22,7 +22,11 @@ if [ "${1:-}" = "stop" ]; then
 fi
 
 echo "starting Higgs v3 on 127.0.0.1:$PORT (log: $LOG)"
-nohup "$SGL" serve --model-path "$MODEL_DIR" --host 127.0.0.1 --port "$PORT" </dev/null >"$LOG" 2>&1 &
+# This is the configuration used by the published Higgs H100 benchmark.
+# Keeping admission and CUDA-graph capture aligned avoids queued requests
+# silently falling outside the captured batch-size range.
+nohup "$SGL" serve --model-path "$MODEL_DIR" --host 127.0.0.1 --port "$PORT" \
+  --max-running-requests 16 --cuda-graph-max-bs 16 </dev/null >"$LOG" 2>&1 &
 echo $! >"$PIDFILE"
 
 start=$(date +%s)

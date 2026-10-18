@@ -1,7 +1,7 @@
 {
-  "run": true,
+  "run": false,
   "mode": "render",
-  "gpu": "L4",
+  "gpu": "H100",
   "novels": ["the-shining"],
   "chapters": ""
 }
