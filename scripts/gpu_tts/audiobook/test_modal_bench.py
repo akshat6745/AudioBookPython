@@ -13,33 +13,24 @@ import render
 SR = 24000
 
 
-def test_sweep_doubles_despite_misleading_gpu_metrics():
-    nxt, settled = modal_bench.next_concurrency(2, 30, 4.0, None, 0, 4, 40)
-    assert (nxt, settled) == (4, False)
-    nxt, settled = modal_bench.next_concurrency(4, 99, 8.0, {"concurrency": 2, "x_realtime": 4.0}, 0, 16, 98)
-    assert (nxt, settled) == (8, False)
+def test_requested_width_settles_despite_misleading_gpu_metrics():
+    nxt, settled = modal_bench.next_concurrency(128, 99, 20.0, None, 0, 256, 98)
+    assert (nxt, settled) == (128, True)
 
 
-def test_ceiling_or_a_slower_step_locks_the_width():
-    nxt, settled = modal_bench.next_concurrency(16, 91, 20.0, {"concurrency": 8, "x_realtime": 18.0}, 0, 32, 98)
-    assert (nxt, settled) == (16, True)
-    nxt, settled = modal_bench.next_concurrency(8, 50, 10.0, {"concurrency": 4, "x_realtime": 18.0}, 0, 32, 60)
-    assert (nxt, settled) == (4, True)
+def test_errors_back_off_but_reserved_vram_does_not():
+    assert modal_bench.next_concurrency(128, 40, 0.0, None, 4, 4, 50) == (64, False)
+    assert modal_bench.next_concurrency(64, 99, 8.0, None, 0, 128, 98) == (64, True)
 
 
-def test_errors_back_off_but_reserved_vram_does_not_stop_the_sweep():
-    assert modal_bench.next_concurrency(16, 40, 1.0, None, 3, 4, 50) == (8, True)
-    assert modal_bench.next_concurrency(4, 99, 8.0, None, 0, 4, 98) == (8, False)
-    assert modal_bench.next_concurrency(16, 20, 8.0, None, 0, 4, 50) == (16, True)
-
-
-def test_ramp_trace_settles_when_the_gpu_is_full():
+def test_ramp_starts_at_128_and_backs_off_until_success():
     ramp = modal_bench.Ramp()
-    ramp.observe(8, 2, errors=0, clips=4, sample={"util": 40, "vram_pct": 30})
-    assert ramp.workers == 4 and not ramp.settled
-    ramp.observe(20, 2, errors=0, clips=8, sample={"util": 93, "vram_pct": 98})
-    assert ramp.workers == 8 and not ramp.settled
-    assert [row["concurrency"] for row in ramp.trace] == [2, 4]
+    assert ramp.workers == 128
+    ramp.observe(0, 1, errors=256, clips=256, sample={"util": 99, "vram_pct": 98})
+    assert ramp.workers == 64 and not ramp.settled
+    ramp.observe(20, 2, errors=0, clips=128, sample={"util": 99, "vram_pct": 98})
+    assert ramp.workers == 64 and ramp.settled
+    assert [row["concurrency"] for row in ramp.trace] == [128, 64]
 
 
 class QuietTTS:
@@ -72,14 +63,23 @@ def test_manifest_is_marked_pending_without_a_whisper_check(tmp_path):
     assert manifest["title"]["file"] == "title.opus"
 
 
-def test_queue_command_renders_the_whole_novel_on_h100():
-    cmd = queue_modal_task.command({"gpu": "H100", "chapters": "", "novels": ["the-shining"]})
-    assert cmd == ["modal", "run", "--detach", "modal_app.py::render_h100", "--novel=the-shining"]
+def test_queue_command_renders_multiple_novels_on_l40s():
+    cmd = queue_modal_task.command({"gpu": "L40S", "chapters": "", "novels": ["the-shining", "the-eye-of-the-world"]})
+    assert cmd == [
+        "modal", "run", "--detach", "modal_app.py::render_l40s",
+        "--novels=the-shining,the-eye-of-the-world",
+    ]
 
 
-def test_request_file_stays_disarmed():
+def test_request_file_has_valid_launch_schema():
     request = json.loads(Path(__file__).parents[3].joinpath("render_request.json").read_text())
-    assert request["run"] is False
-    assert request["gpu"] == "H100"
+    assert isinstance(request["run"], bool)
+    assert request["gpu"] == "L40S"
     assert request["chapters"] == ""
-    assert request["novels"] == ["the-shining"]
+    assert request["novels"] == [
+        "the-shining",
+        "haunting-adeline-cat-and-mouse-duet-book-1",
+        "the-eye-of-the-world",
+        "oathbringer-the-stormlight-archive-book-3",
+        "lord-of-the-mysteries",
+    ]

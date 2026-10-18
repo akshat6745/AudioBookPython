@@ -143,8 +143,7 @@ def render(tts, novel: str, ch: int, variant: str, title: str, ps: list[str], re
     while pending:
         width = ramp.workers if ramp else workers
         probing = ramp is not None and not ramp.settled
-        # Small waves are dominated by paragraph length and fixed request overhead.
-        # Use at least 16 real paragraphs so adjacent widths are comparable.
+        # Probe with enough real paragraphs to fill the requested server width.
         batch = pending[: max(16, width * 2)] if probing else pending
         pending = pending[len(batch):]
         window = ramp.measure() if probing else None
@@ -160,9 +159,13 @@ def render(tts, novel: str, ch: int, variant: str, title: str, ps: list[str], re
             if window:
                 window.stop()
             failures += 1
-            if not probing or failures > 1:
+            if not probing:
                 raise
+            old_width = ramp.workers
             ramp.observe(0.0, 1.0, errors=len(batch), clips=len(batch), sample=window.summary())
+            if ramp.workers >= old_width:
+                raise
+            log(f"  {variant} ch{ch}: {old_width} streams failed; retrying at {ramp.workers}")
             pending = batch + pending
             continue
         if window:

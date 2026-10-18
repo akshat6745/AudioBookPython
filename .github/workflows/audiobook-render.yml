@@ -1,6 +1,6 @@
 name: Render audiobooks on Modal
 
-# Edit render_request.json on this branch and commit with "run": true. GitHub starts a detached Modal H100
+# Edit render_request.json on this branch and commit with "run": true. GitHub starts a detached Modal L40S
 # render and then exits; the GPU keeps running. Needs MODAL_TOKEN_ID and MODAL_TOKEN_SECRET.
 on:
   push:

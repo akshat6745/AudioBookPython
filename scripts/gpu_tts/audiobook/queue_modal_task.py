@@ -7,15 +7,15 @@ import json
 import subprocess
 import sys
 
-FUNCTIONS = {"H100": "render_h100"}
+FUNCTIONS = {"L40S": "render_l40s"}
 
 
 def command(request: dict) -> list[str]:
-    gpu = request.get("gpu") or "H100"
+    gpu = request.get("gpu") or "L40S"
     if gpu not in FUNCTIONS:
-        raise SystemExit(f"gpu must be H100 for this render, got {gpu!r}")
-    novel = (request.get("novels") or ["the-shining"])[0]
-    cmd = ["modal", "run", "--detach", f"modal_app.py::{FUNCTIONS[gpu]}", f"--novel={novel}"]
+        raise SystemExit(f"gpu must be L40S for this render, got {gpu!r}")
+    novels = request.get("novels") or ["the-shining"]
+    cmd = ["modal", "run", "--detach", f"modal_app.py::{FUNCTIONS[gpu]}", f"--novels={','.join(novels)}"]
     chapters = str(request.get("chapters") or "").strip()
     if chapters:
         cmd.append(f"--chapters={chapters}")

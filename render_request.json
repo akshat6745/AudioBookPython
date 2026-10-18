@@ -1,7 +1,13 @@
 {
-  "run": false,
+  "run": true,
   "mode": "render",
-  "gpu": "H100",
-  "novels": ["the-shining"],
+  "gpu": "L40S",
+  "novels": [
+    "the-shining",
+    "haunting-adeline-cat-and-mouse-duet-book-1",
+    "the-eye-of-the-world",
+    "oathbringer-the-stormlight-archive-book-3",
+    "lord-of-the-mysteries"
+  ],
   "chapters": ""
 }

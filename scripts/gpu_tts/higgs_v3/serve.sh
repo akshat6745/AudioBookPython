@@ -10,6 +10,7 @@ SGL="$(command -v sgl-omni || echo /opt/omni/bin/sgl-omni)"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOG="$HERE/../logs/higgs_v3.log"
 PIDFILE="$HERE/../logs/higgs_v3.pid"
+WIDTHFILE="$HERE/../logs/higgs_v3.max_concurrency"
 mkdir -p "$(dirname "$LOG")"
 
 if [ "${1:-}" = "stop" ]; then
@@ -21,21 +22,35 @@ if [ "${1:-}" = "stop" ]; then
   exit 0
 fi
 
-echo "starting Higgs v3 on 127.0.0.1:$PORT (log: $LOG)"
-# This is the configuration used by the published Higgs H100 benchmark.
-# Keeping admission and CUDA-graph capture aligned avoids queued requests
-# silently falling outside the captured batch-size range.
-nohup "$SGL" serve --model-path "$MODEL_DIR" --host 127.0.0.1 --port "$PORT" \
-  --max-running-requests 16 --cuda-graph-max-bs 16 </dev/null >"$LOG" 2>&1 &
-echo $! >"$PIDFILE"
+rm -f "$WIDTHFILE"
+for width in 128 64 32 16; do
+  echo "starting Higgs v3 at concurrency $width on 127.0.0.1:$PORT (log: $LOG)"
+  nohup "$SGL" serve --model-path "$MODEL_DIR" --host 127.0.0.1 --port "$PORT" \
+    --max-running-requests "$width" --cuda-graph-max-bs "$width" </dev/null >"$LOG" 2>&1 &
+  echo $! >"$PIDFILE"
 
-start=$(date +%s)
-until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; do
-  if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    echo "server exited during startup; last log lines:"; tail -40 "$LOG"; exit 1
+  start=$(date +%s)
+  failed=0
+  until curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; do
+    if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+      echo "server exited at concurrency $width; retrying lower"
+      tail -40 "$LOG"
+      failed=1
+      break
+    fi
+    [ $(( $(date +%s) - start )) -gt 900 ] && {
+      echo "not healthy after 15 min at concurrency $width"
+      tail -40 "$LOG"
+      exit 1
+    }
+    sleep 5
+  done
+  if [ "$failed" -eq 0 ]; then
+    echo "$width" >"$WIDTHFILE"
+    echo "healthy at concurrency $width after $(( $(date +%s) - start ))s"
+    nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
+    exit 0
   fi
-  [ $(( $(date +%s) - start )) -gt 900 ] && { echo "not healthy after 15 min"; tail -40 "$LOG"; exit 1; }
-  sleep 5
 done
-echo "healthy after $(( $(date +%s) - start ))s"
-nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
+echo "Higgs failed to start at every concurrency" >&2
+exit 1

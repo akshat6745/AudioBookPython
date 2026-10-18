@@ -1,10 +1,10 @@
-"""Modal H100 render. Concurrency rises while real chapter audio is produced. Whisper stays on the Mac.
+"""Budget-capped Modal L40S render for the five emotion-tagged novels.
 
 The Cloudflare values come from the Modal secret `cloudflare-audiobook`. GitHub Actions starts:
 
-  modal run --detach modal_app.py::render_h100 --novel=the-shining
+  modal run --detach modal_app.py::render_l40s --novels=the-shining,...
 
-Progress is written to R2 at ml/emotion-2026-10-10/render_runs/<novel>-adaptive.json.
+Progress is written to R2 at ml/emotion-2026-10-10/render_runs/five-novels-l40s-adaptive.json.
 A rerun skips chapters whose manifest is already in R2.
 """
 import os
@@ -28,12 +28,14 @@ image = (
 app = modal.App("audiobook-render", image=image)
 
 
-@app.function(gpu="H100", cpu=8, memory=32768, timeout=24 * 3600, secrets=[SECRET], volumes={CACHE: VOLUME})
-def render_h100(novel: str = "the-shining", chapters: str = "") -> dict:
-    os.environ["MODAL_GPU"] = "H100"
+@app.function(gpu="L40S", cpu=4, memory=16384, timeout=7 * 3600 + 50 * 60,
+              secrets=[SECRET], volumes={CACHE: VOLUME})
+def render_l40s(novels: str = "the-shining", chapters: str = "") -> dict:
+    os.environ["MODAL_GPU"] = "L40S"
     sys.path[:0] = [f"{GPU_TTS}/audiobook", GPU_TTS]
     import modal_bench
 
-    result = modal_bench.run_render(novel, chapters or None, cache=Path(CACHE))
+    selected = [novel.strip() for novel in novels.split(",") if novel.strip()]
+    result = modal_bench.run_render(selected, chapters or None, cache=Path(CACHE))
     VOLUME.commit()
     return result

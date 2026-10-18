@@ -527,7 +527,7 @@ def locked_clip_checker():
 
 def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higgs_variant: str,
                      skip_whisper: bool, keep_files: bool, novels_filter: set[str] | None,
-                     ramp=None, on_chapter=None) -> dict:
+                     ramp=None, on_chapter=None, should_continue=None) -> dict:
     """Phase 2: Synthesize Whisper-checked dual-voice audio per chapter, encode it, and upload to R2.
 
     Returns {"uploaded": [...], "held": [...]} as "<novel>/<chapter>" strings.
@@ -550,8 +550,11 @@ def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higg
 
     cuts = hf.Cuts()
     summary: dict[str, list[str]] = {"uploaded": [], "held": []}
+    stop_requested = False
 
     for njob in bundle["novels"]:
+        if stop_requested:
+            break
         novel = njob["novel"]
         if novels_filter and novel not in novels_filter:
             continue
@@ -564,6 +567,10 @@ def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higg
 
         for ch_spec in chapters_specs:
             ch = int(ch_spec["chapter"])
+            if should_continue and not should_continue():
+                log(f"[phase 2] budget deadline reached before {novel} ch{ch}; stopping cleanly")
+                stop_requested = True
+                break
             uploaded_marker = novel_dir / "manifest" / "dual" / f"{ch:05d}.uploaded.json"
             if uploaded_marker.exists():
                 log(f"[phase 2] {novel} ch{ch}: already uploaded, skipping")

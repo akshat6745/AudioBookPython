@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Render a novel on one Modal GPU, raising Higgs concurrency while the audio is produced.
+"""Render the tagged novels on one budget-capped Modal L40S.
 
-The first waves are real chapter audio. Concurrency starts at 2 and rises until the GPU is near full,
-more streams stop producing more audio, requests fail, or VRAM is nearly exhausted. Whisper stays off.
+Start with 128 client streams. If the server rejects that width, halve it and
+retry the same real chapter audio until a stable width succeeds. Whisper stays off.
 """
 from __future__ import annotations
 
@@ -17,26 +17,23 @@ from pathlib import Path
 import cloud_render as cr
 import gpu_library_worker as gw
 
-CEILING = 16
+CEILING = 128
+SOFT_BUDGET_S = 7 * 3600
 
 
 def next_concurrency(current: int, util: float | None, x_realtime: float, previous: dict | None,
                      errors: int, clips: int, vram_pct: float | None, ceiling: int = CEILING) -> tuple[int, bool]:
     """Return (concurrency for the next wave, settled).
 
-    Sweep 2, 4, 8, 16 and stop only when measured audio throughput falls. SGLang
-    reserves most VRAM for its KV cache and an autoregressive decode can report
-    near-100% GPU utilization at batch 1, so neither metric is a saturation signal.
-    They remain in the trace for diagnosis.
+    The requested width is 128. On request failures, halve and retry. SGLang
+    reserves most VRAM for its KV cache and autoregressive decode can report
+    near-100% GPU utilization, so neither metric is a saturation signal.
+    They remain in the trace only for diagnosis.
     """
     if clips and errors > clips // 2:
-        return previous["concurrency"] if previous else max(1, current // 2), True
-    if previous and x_realtime < 0.95 * previous["x_realtime"]:
-        return previous["concurrency"], True
-    if current >= ceiling:
-        return current, True
-    nxt = min(ceiling, current * 2)
-    return nxt, nxt == current
+        nxt = max(1, current // 2)
+        return nxt, nxt == current
+    return current, True
 
 
 class GpuWindow:
@@ -86,7 +83,7 @@ def gpu_sample() -> dict | None:
 
 class Ramp:
     def __init__(self, ceiling: int = CEILING):
-        self.workers = 2
+        self.workers = ceiling
         self.settled = False
         self.ceiling = ceiling
         self.trace: list[dict] = []
@@ -104,14 +101,15 @@ class Ramp:
         self.trace.append({"concurrency": self.workers, "next": nxt, "settled": settled, "x_realtime": x,
                            "errors": errors, "clips": clips, "util": sample.get("util"),
                            "vram_pct": sample.get("vram_pct")})
-        self._previous = {"concurrency": self.workers, "x_realtime": x}
+        if not errors:
+            self._previous = {"concurrency": self.workers, "x_realtime": x}
         self.workers, self.settled = nxt, settled
         return self.workers
 
 
-def run_render(novel: str = "the-shining", chapters: str | None = None,
+def run_render(novels: list[str] | None = None, chapters: str | None = None,
                work: Path = Path("/workspace/audiobook_job"), cache: Path | None = Path("/workspace/cache")) -> dict:
-    """Render one novel. chapters is empty for the whole book. Uploaded chapters are skipped on a rerun."""
+    """Render novels in order until the soft budget. Uploaded chapters are skipped on a rerun."""
     missing = [k for k in cr.SECRETS if not os.environ.get(k)]
     if missing:
         raise SystemExit(f"missing environment variables (Modal secret cloudflare-audiobook): {', '.join(missing)}")
@@ -119,12 +117,14 @@ def run_render(novel: str = "the-shining", chapters: str | None = None,
         os.environ.setdefault("HF_HOME", str(cache / "hf"))
     selected = cr.chapter_list(chapters) if chapters else None
     t0 = time.time()
+    deadline = t0 + SOFT_BUDGET_S
+    novels = novels or ["the-shining"]
     s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
-    bundle, job = cr.build_job(s3, bucket, cr.d1_query, work, [novel], selected, fmt="opus", workers=2)
+    bundle, job = cr.build_job(s3, bucket, cr.d1_query, work, novels, selected, fmt="opus", workers=CEILING)
     ramp = Ramp()
-    result = {"novel": novel, "chapters": chapters or "all", "gpu": os.environ.get("MODAL_GPU", "L4"),
+    result = {"novels": novels, "chapters": chapters or "all", "gpu": os.environ.get("MODAL_GPU", "L40S"),
               "qa": "pending-whisper", "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t0)),
-              "job": job, "uploaded": [], "held": []}
+              "soft_budget_hours": SOFT_BUDGET_S / 3600, "job": job, "uploaded": [], "held": []}
 
     def publish(summary: dict | None = None) -> None:
         if summary:
@@ -134,16 +134,23 @@ def run_render(novel: str = "the-shining", chapters: str | None = None,
         result["settled"] = ramp.settled
         result["trace"] = ramp.trace
         result["hours"] = round((time.time() - t0) / 3600, 2)
+        result["budget_stopped"] = time.time() >= deadline
         body = json.dumps(result, indent=1).encode()
-        s3.put_object(Bucket=bucket, Key=f"{cr.ML_PREFIX}/render_runs/{novel}-adaptive.json",
+        s3.put_object(Bucket=bucket, Key=f"{cr.ML_PREFIX}/render_runs/five-novels-l40s-adaptive.json",
                       Body=body, ContentType="application/json")
 
     if any(n["chapters"] for n in bundle["novels"]):
         try:
             cr.start_higgs(cache)
+            width_file = cr.GPU_TTS / "logs" / "higgs_v3.max_concurrency"
+            if width_file.exists():
+                server_width = int(width_file.read_text().strip())
+                ramp.workers = ramp.ceiling = min(CEILING, server_width)
+                result["server_concurrency"] = server_width
             summary = gw.run_phase2_audio(
                 bundle, work, "http://127.0.0.1:8000", "sglang", "sglang",
-                skip_whisper=True, keep_files=False, novels_filter=None, ramp=ramp, on_chapter=publish)
+                skip_whisper=True, keep_files=False, novels_filter=None, ramp=ramp, on_chapter=publish,
+                should_continue=lambda: time.time() < deadline)
             result["uploaded"] = summary["uploaded"]
             result["held"] = summary["held"]
         finally:
@@ -151,6 +158,6 @@ def run_render(novel: str = "the-shining", chapters: str | None = None,
             publish()
     else:
         publish()
-    gw.log(f"render report -> {cr.ML_PREFIX}/render_runs/{novel}-adaptive.json "
+    gw.log(f"render report -> {cr.ML_PREFIX}/render_runs/five-novels-l40s-adaptive.json "
            f"concurrency {ramp.workers} uploaded {len(result['uploaded'])}")
     return result
