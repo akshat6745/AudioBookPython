@@ -1,8 +1,7 @@
-name: Render audiobooks on Beam
+name: Render audiobooks on Modal
 
-# Edit render_request.json on this branch in the GitHub web editor and commit with "run": true. This deploys
-# beam_app.py and queues one render task on a Beam RTX 4090; the task keeps running after this workflow ends.
-# Needs the repository secret BEAM_TOKEN.
+# Edit render_request.json on this branch and commit with "run": true. GitHub starts a detached Modal GPU
+# benchmark and then exits; the GPU keeps running. Needs MODAL_TOKEN_ID and MODAL_TOKEN_SECRET.
 on:
   push:
     branches: [audiobook-gpu-render]
@@ -18,8 +17,10 @@ concurrency:
 jobs:
   queue:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
-      BEAM_TOKEN: ${{ secrets.BEAM_TOKEN }}
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,10 +33,7 @@ jobs:
         with:
           python-version: "3.11"
       - if: steps.req.outputs.run == 'true'
-        run: python -m pip install beam-client
-      - name: Deploy
+        run: python -m pip install modal
+      - name: Start detached benchmark
         if: steps.req.outputs.run == 'true'
-        run: beam --no-input deploy beam_app.py:render_novels --name audiobook-render --json | tee deploy.json
-      - name: Queue render task
-        if: steps.req.outputs.run == 'true'
-        run: python scripts/gpu_tts/audiobook/queue_beam_task.py deploy.json render_request.json
+        run: python scripts/gpu_tts/audiobook/queue_modal_task.py render_request.json

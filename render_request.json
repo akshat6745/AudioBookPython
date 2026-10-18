@@ -1,6 +1,8 @@
 {
   "run": false,
+  "mode": "benchmark",
+  "gpu": "L40S",
   "novels": ["the-shining"],
   "chapters": "1-3",
-  "retry_held": false
+  "levels": [8, 16, 32, 48, 64]
 }
