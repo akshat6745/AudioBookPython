@@ -36,4 +36,7 @@ snapshot_download("$MODEL_ID", local_dir="$MODEL_DIR", max_workers=8)
 EOF
 du -sh "$MODEL_DIR"
 
+log "validating image-bundled Higgs config schema (no GPU workers)"
+"$PY" "$(dirname "$0")/validate_config.py" "$MODEL_DIR"
+
 log "done. Next: bash higgs_v3/serve.sh"

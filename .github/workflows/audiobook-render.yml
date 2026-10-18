@@ -1,7 +1,8 @@
 name: Render audiobooks on Modal
 
 # Edit render_request.json on this branch and commit with "run": true. GitHub starts a detached Modal L40S
-# render and then exits; the GPU keeps running. Needs MODAL_TOKEN_ID and MODAL_TOKEN_SECRET.
+# render, then watches until the server is healthy and one chapter has rendered.
+# Needs MODAL_TOKEN_ID and MODAL_TOKEN_SECRET.
 on:
   push:
     branches: [audiobook-gpu-render]
@@ -37,3 +38,6 @@ jobs:
       - name: Start detached render
         if: steps.req.outputs.run == 'true'
         run: python scripts/gpu_tts/audiobook/queue_modal_task.py render_request.json
+      - name: Verify actual chapter rendering
+        if: steps.req.outputs.run == 'true'
+        run: python scripts/gpu_tts/audiobook/monitor_modal_render.py

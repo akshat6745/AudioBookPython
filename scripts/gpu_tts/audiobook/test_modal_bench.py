@@ -7,6 +7,7 @@ import numpy as np
 
 import higgs_format as hf
 import modal_bench
+import monitor_modal_render
 import queue_modal_task
 import render
 
@@ -71,12 +72,33 @@ def test_queue_command_renders_multiple_novels_on_l40s():
     ]
 
 
-def test_server_uses_stage_scoped_engine_configuration():
+def test_monitor_requires_health_before_real_render():
+    healthy, rendered = monitor_modal_render.observe(
+        "[phase 2] the-shining ch6: rendered 4.2m audio in 10.0s", False
+    )
+    assert not healthy and not rendered
+    healthy, rendered = monitor_modal_render.observe(
+        "healthy at concurrency 64 after 120s", healthy
+    )
+    assert healthy and not rendered
+    healthy, rendered = monitor_modal_render.observe(
+        "[phase 2] the-shining ch6: rendered 4.2m audio in 10.0s", healthy
+    )
+    assert healthy and rendered
+
+
+def test_server_uses_image_v010_indexed_configuration():
     root = Path(__file__).parents[3]
     serve = root.joinpath("scripts/gpu_tts/higgs_v3/serve.sh").read_text()
     setup = root.joinpath("scripts/gpu_tts/higgs_v3/setup.sh").read_text()
-    assert "--tts_engine.engine.max_running_requests" in serve
-    assert "--tts_engine.engine.cuda_graph_max_bs" in serve
+    assert "--stages.0.factory_args.max_concurrency" in serve
+    assert "--stages.1.factory_args.max_batch_size" in serve
+    assert (
+        "--stages.2.factory_args.server_args_overrides.max_running_requests" in serve
+    )
+    assert "--stages.2.factory_args.server_args_overrides.cuda_graph_max_bs" in serve
+    assert "--stages.3.factory_args.max_batch_size" in serve
+    assert "validate_config.py" in setup
     assert 'pip install --python "$PY"' not in setup
 
 
