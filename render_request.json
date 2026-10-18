@@ -1,5 +1,5 @@
 {
-  "run": false,
+  "run": true,
   "mode": "render",
   "gpu": "L4",
   "novels": ["the-shining"],
