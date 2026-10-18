@@ -10,6 +10,7 @@ import modal_bench
 import monitor_modal_render
 import queue_modal_task
 import render
+import stop_modal_render
 
 SR = 24000
 
@@ -62,6 +63,18 @@ def test_manifest_is_marked_pending_without_a_whisper_check(tmp_path):
     manifest = json.loads((tmp_path / "manifest/dual/00001.json").read_text())
     assert manifest["qa"] == "pending-whisper"
     assert manifest["title"]["file"] == "title.opus"
+
+
+def test_stop_targets_only_the_live_audiobook_app():
+    apps = [
+        {"description": "audiobook-render", "state": "ephemeral (detached)", "app_id": "ap-live"},
+        {"description": "audiobook-render", "state": "stopped", "app_id": "ap-old"},
+        {"description": "other-app", "state": "ephemeral", "app_id": "ap-other"},
+    ]
+    named = stop_modal_render.audiobook_apps(apps)
+    assert [app["app_id"] for app in named] == ["ap-live", "ap-old"]
+    active = [app for app in named if app["state"] in stop_modal_render.ACTIVE]
+    assert [app["app_id"] for app in active] == ["ap-live"]
 
 
 def test_queue_command_renders_multiple_novels_on_l40s():
