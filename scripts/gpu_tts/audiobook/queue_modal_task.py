@@ -7,7 +7,7 @@ import json
 import subprocess
 import sys
 
-FUNCTIONS = {"L40S": "render_l40s"}
+FUNCTIONS = {"L40S": "queue_l40s"}
 
 
 def command(request: dict) -> list[str]:

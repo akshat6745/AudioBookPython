@@ -66,9 +66,18 @@ def test_manifest_is_marked_pending_without_a_whisper_check(tmp_path):
 def test_queue_command_renders_multiple_novels_on_l40s():
     cmd = queue_modal_task.command({"gpu": "L40S", "chapters": "", "novels": ["the-shining", "the-eye-of-the-world"]})
     assert cmd == [
-        "modal", "run", "--detach", "modal_app.py::render_l40s",
+        "modal", "run", "--detach", "modal_app.py::queue_l40s",
         "--novels=the-shining,the-eye-of-the-world",
     ]
+
+
+def test_server_uses_stage_scoped_engine_configuration():
+    root = Path(__file__).parents[3]
+    serve = root.joinpath("scripts/gpu_tts/higgs_v3/serve.sh").read_text()
+    setup = root.joinpath("scripts/gpu_tts/higgs_v3/setup.sh").read_text()
+    assert "--tts_engine.engine.max_running_requests" in serve
+    assert "--tts_engine.engine.cuda_graph_max_bs" in serve
+    assert 'pip install --python "$PY"' not in setup
 
 
 def test_request_file_has_valid_launch_schema():

@@ -2,7 +2,7 @@
 
 The Cloudflare values come from the Modal secret `cloudflare-audiobook`. GitHub Actions starts:
 
-  modal run --detach modal_app.py::render_l40s --novels=the-shining,...
+  modal run --detach modal_app.py::queue_l40s --novels=the-shining,...
 
 Progress is written to R2 at ml/emotion-2026-10-10/render_runs/five-novels-l40s-adaptive.json.
 A rerun skips chapters whose manifest is already in R2.
@@ -39,3 +39,10 @@ def render_l40s(novels: str = "the-shining", chapters: str = "") -> dict:
     result = modal_bench.run_render(selected, chapters or None, cache=Path(CACHE))
     VOLUME.commit()
     return result
+
+
+@app.local_entrypoint()
+def queue_l40s(novels: str = "the-shining", chapters: str = "") -> None:
+    """Submit one durable L40S function call and return without waiting."""
+    call = render_l40s.spawn(novels, chapters)
+    print(f"spawned Modal function call {call.object_id}")

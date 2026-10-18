@@ -26,7 +26,8 @@ rm -f "$WIDTHFILE"
 for width in 128 64 32 16; do
   echo "starting Higgs v3 at concurrency $width on 127.0.0.1:$PORT (log: $LOG)"
   nohup "$SGL" serve --model-path "$MODEL_DIR" --host 127.0.0.1 --port "$PORT" \
-    --max-running-requests "$width" --cuda-graph-max-bs "$width" </dev/null >"$LOG" 2>&1 &
+    --tts_engine.engine.max_running_requests "$width" \
+    --tts_engine.engine.cuda_graph_max_bs "$width" </dev/null >"$LOG" 2>&1 &
   echo $! >"$PIDFILE"
 
   start=$(date +%s)

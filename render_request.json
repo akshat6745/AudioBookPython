@@ -1,6 +1,6 @@
 {
   "run": true,
-  "attempt": 2,
+  "attempt": 3,
   "mode": "render",
   "gpu": "L40S",
   "novels": [

@@ -22,12 +22,10 @@ df -h /dev/shm /workspace 2>/dev/null || df -h /dev/shm /
 shm_gb=$(df -BG --output=size /dev/shm | tail -1 | tr -dc 0-9)
 [ "$shm_gb" -lt 8 ] && echo "WARNING: /dev/shm is ${shm_gb}G; if serve crashes, relaunch with docker option --shm-size=32g"
 
-current_version=$("$PY" -c "import sglang_omni; print(sglang_omni.__version__)" 2>/dev/null || true)
-if [ "$current_version" != "0.1.7" ]; then
-  log "upgrading sglang-omni ${current_version:-missing} -> 0.1.7 for configurable Higgs concurrency"
-  uv pip install --python "$PY" --prerelease=allow --upgrade "sglang-omni==0.1.7"
-fi
-"$PY" -c "import sglang_omni; print('sglang_omni', sglang_omni.__version__)"
+# Keep the image's matched SGLang/FlashInfer environment intact. Upgrading only
+# sglang-omni can install a FlashInfer Python package that is newer than the
+# image's compiled flashinfer-cubin kernels.
+"$PY" -c "import sglang_omni; print('image sglang_omni', sglang_omni.__version__)"
 "$(dirname "$PY")/sgl-omni" check-gpu || true
 
 log "downloading $MODEL_ID (~9.3 GB) to $MODEL_DIR"
