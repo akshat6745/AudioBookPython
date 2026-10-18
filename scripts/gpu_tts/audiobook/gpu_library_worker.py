@@ -526,7 +526,8 @@ def locked_clip_checker():
 
 
 def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higgs_variant: str,
-                     skip_whisper: bool, keep_files: bool, novels_filter: set[str] | None) -> dict:
+                     skip_whisper: bool, keep_files: bool, novels_filter: set[str] | None,
+                     ramp=None, on_chapter=None) -> dict:
     """Phase 2: Synthesize Whisper-checked dual-voice audio per chapter, encode it, and upload to R2.
 
     Returns {"uploaded": [...], "held": [...]} as "<novel>/<chapter>" strings.
@@ -577,8 +578,10 @@ def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higg
             reqs = render_mod.plan(ps, ts, "dual", cuts)
 
             t0 = time.perf_counter()
+            width = ramp.workers if ramp else workers
+            qa_status = "pending-whisper" if ramp is not None else None
             stats = render_mod.render(tts, novel, ch, "dual", title_line, ps, reqs, ts, novel_dir, log, check,
-                                      workers, ext)
+                                      width, ext, ramp=ramp, qa_status=qa_status)
             wall_s = time.perf_counter() - t0
             log(f"[phase 2] {novel} ch{ch}: rendered {stats['audio_s'] / 60:.1f}m audio in {wall_s:.1f}s "
                 f"({stats['audio_s'] / max(wall_s, 1e-9):.1f}x realtime, bursts dropped {stats['bursts_dropped']}, "
@@ -596,6 +599,8 @@ def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higg
                 log(f"[phase 2] {novel} ch{ch}: HELD, {len(stats['check_failed'])} clip(s) failed the Whisper "
                     f"check after {render_mod.CHECK_ATTEMPTS} attempts -> {held}")
                 summary["held"].append(f"{novel}/{ch}")
+                if on_chapter:
+                    on_chapter(summary)
                 if not keep_files:
                     cleanup_chapter_files(novel_dir, ch, "dual")
                 continue
@@ -609,6 +614,8 @@ def run_phase2_audio(bundle: dict, work: Path, url: str, backend_name: str, higg
 
             upload_chapter_bundle(ch_spec, novel_dir, voices_meta, "dual", content_type)
             summary["uploaded"].append(f"{novel}/{ch}")
+            if on_chapter:
+                on_chapter(summary)
             if not keep_files:
                 cleanup_chapter_files(novel_dir, ch, "dual")
 

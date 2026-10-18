@@ -1,11 +1,11 @@
-"""Modal benchmark for Higgs v3 concurrency. Whisper is intentionally not run here.
+"""Modal L4 render. Concurrency rises while real chapter audio is produced. Whisper stays on the Mac.
 
-The Cloudflare values come from the Modal secret `cloudflare-audiobook`. GitHub Actions starts one of:
+The Cloudflare values come from the Modal secret `cloudflare-audiobook`. GitHub Actions starts:
 
-  modal run --detach modal_app.py::benchmark_l40s --chapters=1-3 --levels=8,16,32,48,64
-  modal run --detach modal_app.py::benchmark_l4 --chapters=1-3 --levels=8,16,32,48,64
+  modal run --detach modal_app.py::render_l4 --novel=the-shining
 
-The report is written to R2 at ml/emotion-2026-10-10/render_runs/benchmark-<time>.json.
+Progress is written to R2 at ml/emotion-2026-10-10/render_runs/<novel>-adaptive.json.
+A rerun skips chapters whose manifest is already in R2.
 """
 import os
 import sys
@@ -25,24 +25,15 @@ image = (
     .add_local_dir("scripts/gpu_tts", remote_path=GPU_TTS, ignore=["**/__pycache__/**"])
 )
 
-app = modal.App("audiobook-benchmark", image=image)
+app = modal.App("audiobook-render", image=image)
 
 
-def _run(gpu: str, chapters: str, levels: str, novel: str) -> dict:
-    os.environ["MODAL_GPU"] = gpu
+@app.function(gpu="L4", cpu=8, memory=32768, timeout=24 * 3600, secrets=[SECRET], volumes={CACHE: VOLUME})
+def render_l4(novel: str = "the-shining", chapters: str = "") -> dict:
+    os.environ["MODAL_GPU"] = "L4"
     sys.path[:0] = [f"{GPU_TTS}/audiobook", GPU_TTS]
     import modal_bench
 
-    result = modal_bench.run_benchmark(novel, chapters, levels, cache=Path(CACHE))
+    result = modal_bench.run_render(novel, chapters or None, cache=Path(CACHE))
     VOLUME.commit()
     return result
-
-
-@app.function(gpu="L40S", cpu=8, memory=32768, timeout=3 * 3600, secrets=[SECRET], volumes={CACHE: VOLUME})
-def benchmark_l40s(chapters: str = "1-3", levels: str = "8,16,32,48,64", novel: str = "the-shining") -> dict:
-    return _run("L40S", chapters, levels, novel)
-
-
-@app.function(gpu="L4", cpu=8, memory=32768, timeout=3 * 3600, secrets=[SECRET], volumes={CACHE: VOLUME})
-def benchmark_l4(chapters: str = "1-3", levels: str = "8,16,32,48,64", novel: str = "the-shining") -> dict:
-    return _run("L4", chapters, levels, novel)

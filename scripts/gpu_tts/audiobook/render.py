@@ -111,11 +111,14 @@ def merge_stats(into: dict, part: dict) -> None:
 
 
 def render(tts, novel: str, ch: int, variant: str, title: str, ps: list[str], reqs: list[list[tuple[str | None, str]]],
-           tags: list[dict], out: Path, log, check=None, workers: int = 1, ext: str = ".mp3") -> dict:
+           tags: list[dict], out: Path, log, check=None, workers: int = 1, ext: str = ".mp3",
+           ramp=None, qa_status: str | None = None) -> dict:
     """check: see speak(). stats["check_failed"] lists clips that never passed it, with their paragraph.
 
     workers > 1 generates that many paragraphs at once (the SGLang server batches concurrent requests); the
     output is identical to workers=1 because every clip's seed depends only on its position.
+    ramp, while not settled, renders two waves at ramp.workers and then asks the ramp for the next width.
+    qa_status is stored on the manifest (the Modal render uses "pending-whisper").
     """
     stats = new_stats()
     pdir = out / "paras" / variant / f"{ch:05d}"
@@ -134,30 +137,66 @@ def render(tts, novel: str, ch: int, variant: str, title: str, ps: list[str], re
         write_wav(pdir / f"{i}.wav", clip, sr)
         return clip, sr, part
 
+    produced: dict[int, tuple[np.ndarray, int, dict]] = {}
+    pending = list(range(len(reqs)))
+    failures = 0
+    while pending:
+        width = ramp.workers if ramp else workers
+        probing = ramp is not None and not ramp.settled
+        batch = pending[: max(1, width * 2)] if probing else pending
+        pending = pending[len(batch):]
+        window = ramp.measure() if probing else None
+        if window:
+            window.start()
+        try:
+            t0 = time.perf_counter()
+            with ThreadPoolExecutor(max(1, width)) as pool:
+                for i, result in zip(batch, pool.map(one, batch)):
+                    produced[i] = result
+            wall_s = time.perf_counter() - t0
+        except Exception:
+            if window:
+                window.stop()
+            failures += 1
+            if not probing or failures > 1:
+                raise
+            ramp.observe(0.0, 1.0, errors=len(batch), clips=len(batch), sample=window.summary())
+            pending = batch + pending
+            continue
+        if window:
+            window.stop()
+        if probing:
+            audio_s = sum(len(produced[i][0]) / produced[i][1] for i in batch)
+            ramp.observe(audio_s, wall_s, errors=0, clips=len(batch), sample=window.summary())
+
     t = len(title_clip) / sr
     pieces, segs, entries = [title_clip], [], []
-    with ThreadPoolExecutor(max(1, workers)) as pool:
-        for i, (clip, sr, part) in enumerate(pool.map(one, range(len(reqs)))):
-            merge_stats(stats, part)
-            p, chunks = ps[i], reqs[i]
-            spoken = len(clip) / sr - (PARA_GAP_S if chunks else len(clip) / sr)
-            segs.append({"paragraph": i, "start": round(t, 3), "end": round(t + spoken, 3),
-                         "requests": [c for _, c in chunks], "voices": [v for v, _ in chunks], "tags": tags[i]})
-            entries.append({"index": i, "app_index": i + 1, "file": f"{i}{ext}", "duration_s": round(len(clip) / sr, 3),
-                            "text_sha256": hashlib.sha256(p.encode()).hexdigest(), "silent": not chunks,
-                            "voices": sorted({v for v, _ in chunks if v}), "tags": tags[i]})
-            pieces.append(clip)
-            t += len(clip) / sr
-            if i % 10 == 0:
-                log(f"  {variant} ch{ch} paragraph {i + 1}/{len(reqs)}  audio {t / 60:5.1f} min  "
-                    f"gpu mem {tts.memory_gb()} GB")
+    for i in range(len(reqs)):
+        clip, sr, part = produced[i]
+        merge_stats(stats, part)
+        p, chunks = ps[i], reqs[i]
+        spoken = len(clip) / sr - (PARA_GAP_S if chunks else len(clip) / sr)
+        segs.append({"paragraph": i, "start": round(t, 3), "end": round(t + spoken, 3),
+                     "requests": [c for _, c in chunks], "voices": [v for v, _ in chunks], "tags": tags[i]})
+        entries.append({"index": i, "app_index": i + 1, "file": f"{i}{ext}", "duration_s": round(len(clip) / sr, 3),
+                        "text_sha256": hashlib.sha256(p.encode()).hexdigest(), "silent": not chunks,
+                        "voices": sorted({v for v, _ in chunks if v}), "tags": tags[i]})
+        pieces.append(clip)
+        t += len(clip) / sr
+        if i % 10 == 0:
+            width = ramp.workers if ramp else workers
+            log(f"  {variant} ch{ch} paragraph {i + 1}/{len(reqs)}  audio {t / 60:5.1f} min  "
+                f"streams {width}  gpu mem {tts.memory_gb()} GB")
     audio = np.concatenate(pieces)
     stats["audio_s"] = round(len(audio) / sr, 1)
     write_wav(out / "wav" / variant / f"{ch:05d}.wav", audio, sr)
-    for sub, data in (("segments", segs), ("manifest", {
-            "novel": novel, "chapter": ch, "tts": tts.name, "variant": variant, "sample_rate": sr,
-            "title": {"text": title, "app_index": 0, "file": f"title{ext}", "duration_s": round(len(title_clip) / sr, 3)},
-            "paragraphs": entries})):
+    manifest = {
+        "novel": novel, "chapter": ch, "tts": tts.name, "variant": variant, "sample_rate": sr,
+        "title": {"text": title, "app_index": 0, "file": f"title{ext}", "duration_s": round(len(title_clip) / sr, 3)},
+        "paragraphs": entries}
+    if qa_status:
+        manifest["qa"] = qa_status
+    for sub, data in (("segments", segs), ("manifest", manifest)):
         (out / sub / variant).mkdir(parents=True, exist_ok=True)
         (out / sub / variant / f"{ch:05d}.json").write_text(json.dumps(data, indent=1, ensure_ascii=False))
     (out / "text" / variant).mkdir(parents=True, exist_ok=True)
