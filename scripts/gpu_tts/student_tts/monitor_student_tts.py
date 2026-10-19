@@ -28,7 +28,7 @@ def main() -> int:
     selection = gpu = False
     while time.monotonic() < deadline:
         proc = subprocess.Popen(
-            ["modal", "app", "logs", APP, "--follow", "--since", "3m", "--timestamps"],
+            ["modal", "app", "logs", APP, "--follow", "--timestamps"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
