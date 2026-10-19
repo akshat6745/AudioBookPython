@@ -286,6 +286,21 @@ def test_cuda_patch_applies_to_pinned_styletts2(tmp_path):
     assert "TRAIN_METRICS" in patched and "num_workers=train_workers" in patched
 
 
+def test_styletts2_training_script_imports_in_the_training_image():
+    import subprocess
+
+    import pytest
+
+    upstream = Path("/opt/styletts2")
+    if not (upstream / "train_finetune.py").exists():
+        pytest.skip("StyleTTS2 checkout only exists in the Docker preflight image")
+    # Every calibration probe is a fresh `python train_finetune.py`; a missing package (pandas, imported by
+    # meldataset.py) makes each one exit in seconds and calibration then finds no stable batch.
+    done = subprocess.run([sys.executable, "-c", "import meldataset, models, utils, losses, train_finetune"],
+                          cwd=upstream, capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+
+
 def test_relaunch_skips_finished_generation_and_qa(tmp_path, monkeypatch):
     import json
 

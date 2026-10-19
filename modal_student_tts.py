@@ -48,7 +48,7 @@ train_image = (
     base_image.run_commands(
         "git clone https://github.com/yl4579/StyleTTS2.git /opt/styletts2",
         "cd /opt/styletts2 && git checkout 5cedc71c333f8d8b8551ca59378bdcc7af4c9529",
-        "python -m pip install munch pydub librosa nltk matplotlib einops einops-exts tqdm "
+        "python -m pip install munch pydub librosa nltk matplotlib einops einops-exts tqdm pandas "
         "tensorboard git+https://github.com/resemble-ai/monotonic_align.git",
     )
     .add_local_dir("scripts/gpu_tts", remote_path=ROOT, ignore=IGNORE)
