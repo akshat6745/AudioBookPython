@@ -1,0 +1,40 @@
+name: Student TTS on Modal
+
+# Edit student_tts_request.json on branch student-tts-modal with "run": true to start one
+# detached L40S (or L4 training) pipeline. Needs MODAL_TOKEN_ID and MODAL_TOKEN_SECRET.
+on:
+  push:
+    branches: [student-tts-modal]
+    paths: [student_tts_request.json]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: student-tts-modal
+  cancel-in-progress: false
+
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check request
+        id: req
+        run: python -c "import json; print('run=' + str(json.load(open('student_tts_request.json')).get('run') is True).lower())" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install modal
+      - name: Start detached student TTS pipeline
+        if: steps.req.outputs.run == 'true'
+        run: python scripts/gpu_tts/student_tts/queue_student_tts.py student_tts_request.json
+      - name: Verify GPU stage activity
+        if: steps.req.outputs.run == 'true'
+        run: python scripts/gpu_tts/student_tts/monitor_student_tts.py

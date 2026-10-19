@@ -42,7 +42,8 @@ if [ "${1:-}" = "stop" ]; then
 fi
 
 rm -f "$WIDTHFILE"
-for width in 128 64 32 16; do
+WIDTHS="${HIGGS_WIDTHS:-128 64 32 16}"
+for width in $WIDTHS; do
   echo "starting Higgs v3 at concurrency $width on 127.0.0.1:$PORT (log: $LOG)"
   nohup "$SGL" serve --model-path "$MODEL_DIR" --host 127.0.0.1 --port "$PORT" \
     --stages.0.factory_args.max_concurrency "$width" \
