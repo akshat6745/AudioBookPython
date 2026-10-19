@@ -1,0 +1,44 @@
+FROM python:3.11-slim-bookworm AS python311
+
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Modal's add_python="3.11" is represented by the official CPython runtime,
+# copied into the same CUDA 12.8 / Ubuntu 24.04 base-image family used remotely.
+COPY --from=python311 /usr/local /usr/local
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates clang curl espeak-ng ffmpeg git \
+      libbz2-1.0 libffi8 liblzma5 libncursesw6 libreadline8 libsndfile1 \
+      libsqlite3-0 libssl3 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+# Same Python dependency set as base_image in modal_student_tts.py.
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install \
+      "boto3>=1.35" "numpy>=2.0,<2.3" "soundfile>=0.12" "pyyaml>=6.0" \
+      "phonemizer>=3.3" "torch==2.7.1" "torchaudio==2.7.1" \
+      "transformers>=4.53,<5" "accelerate>=1.8" "huggingface_hub>=0.33" \
+      modal pytest
+
+# Same StyleTTS2 revision and training dependencies as train_image. This also
+# proves the native monotonic_align extension builds with clang and Python 3.11 headers.
+RUN git clone https://github.com/yl4579/StyleTTS2.git /opt/styletts2 \
+    && cd /opt/styletts2 \
+    && git checkout 5cedc71c333f8d8b8551ca59378bdcc7af4c9529 \
+    && python -m pip install \
+      munch pydub librosa nltk matplotlib einops einops-exts tqdm tensorboard \
+      git+https://github.com/resemble-ai/monotonic_align.git
+
+WORKDIR /workspace/repo
+COPY scripts/gpu_tts /root/gpu_tts
+COPY scripts/gpu_tts /workspace/repo/scripts/gpu_tts
+COPY modal_student_tts.py student_tts_request.json /workspace/repo/
+
+ENV PYTHONPATH=/workspace/repo:/root/gpu_tts/audiobook:/root/gpu_tts/student_tts:/root/gpu_tts
+
+CMD ["python", "scripts/gpu_tts/student_tts/local_smoke.py"]

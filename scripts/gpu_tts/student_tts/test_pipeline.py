@@ -5,8 +5,10 @@ import dataset
 import higgs_format as hf
 import pipeline_worker
 import prepare
+import train_worker
 
-MODAL_STAGE_ENTRYPOINTS = ("select", "generate", "qa_and_publish")
+MODAL_STAGE_ENTRYPOINTS = ("select", "select_from_rows", "generate", "qa_and_publish",
+                           "dataset_publication_plan")
 
 
 def m(setting, stable, throughput, used, total=48):
@@ -17,6 +19,34 @@ def test_pipeline_worker_exports_modal_stage_entrypoints():
     for name in MODAL_STAGE_ENTRYPOINTS:
         fn = getattr(pipeline_worker, name, None)
         assert callable(fn), f"pipeline_worker missing Modal stage entrypoint {name!r}"
+
+
+def test_local_selection_adapter_persists_and_reuses_manifest(tmp_path):
+    rows = []
+    quotas = {"neutral": 1, "anger": 1, "fear": 1}
+    for voice in dataset.VOICES:
+        for emotion in quotas:
+            rows.append({
+                "novel": "fixture", "chapter": 1, "paragraph": len(rows), "chunk": 0,
+                "voice": voice, "emotion": emotion, "text": f"{voice} {emotion}",
+                "tagged_text": f"<|emotion:{emotion}|>{voice} {emotion}", "estimated_s": 2,
+            })
+    first = pipeline_worker.select_from_rows(tmp_path, rows, quotas)
+    second = pipeline_worker.select_from_rows(tmp_path, [], quotas)
+    assert first["manifest"]["clips"] == 6
+    assert first["cached"] is False
+    assert second == {**first, "cached": True}
+
+
+def test_training_command_and_environment_are_preflightable(tmp_path):
+    config = tmp_path / "config.yml"
+    assert train_worker.training_command(config)[1:] == [
+        "train_finetune.py", "--config_path", str(config),
+    ]
+    env = train_worker.training_environment(1, "off", workers=0, prefetch=1)
+    assert env["MAX_STEPS"] == "1"
+    assert env["TRAIN_WORKERS"] == "0"
+    assert env["STYLETTS_AMP"] == "off"
 
 
 def test_higgs_keeps_64_when_higher_width_does_not_improve_passed_audio():

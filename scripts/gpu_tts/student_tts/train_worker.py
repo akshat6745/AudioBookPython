@@ -25,6 +25,20 @@ def log(msg: str) -> None:
     print(f"[train {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def training_command(config: Path) -> list[str]:
+    """Return the exact StyleTTS2 command used by remote training."""
+    return [sys.executable, "train_finetune.py", "--config_path", str(config)]
+
+
+def training_environment(max_steps: int, amp: str, workers: int = 8, prefetch: int = 4) -> dict[str, str]:
+    """Return non-secret training overrides, separately testable in CPU preflight."""
+    return {
+        "MAX_STEPS": str(max_steps), "TRAIN_WORKERS": str(workers),
+        "TRAIN_PREFETCH": str(prefetch), "STYLETTS_AMP": amp,
+        "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false",
+    }
+
+
 def _gpu_identity() -> tuple[str, float]:
     sample = telemetry.gpu_sample() or {}
     return sample.get("gpu", "unknown"), sample.get("vram_total_mb", 0) / 1024
@@ -32,11 +46,9 @@ def _gpu_identity() -> tuple[str, float]:
 
 def _run(config: Path, max_steps: int, timeout_s: int, amp: str, workers: int = 8,
          prefetch: int = 4) -> tuple[int, dict, str]:
-    env = {**os.environ, "MAX_STEPS": str(max_steps), "TRAIN_WORKERS": str(workers),
-           "TRAIN_PREFETCH": str(prefetch), "STYLETTS_AMP": amp,
-           "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false"}
+    env = {**os.environ, **training_environment(max_steps, amp, workers, prefetch)}
     proc = subprocess.Popen(
-        [sys.executable, "train_finetune.py", "--config_path", str(config)],
+        training_command(config),
         cwd=STYLE_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
     )
     metrics, tail, deadline = {}, [], time.monotonic() + timeout_s

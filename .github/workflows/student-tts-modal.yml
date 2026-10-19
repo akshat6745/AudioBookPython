@@ -28,6 +28,25 @@ jobs:
       - name: Check request
         id: req
         run: python -c "import json; print('run=' + str(json.load(open('student_tts_request.json')).get('run') is True).lower())" >> "$GITHUB_OUTPUT"
+      - name: Set up CPU smoke builder
+        if: steps.req.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v3
+      - name: Build mirrored Modal smoke image
+        if: steps.req.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/gpu_tts/student_tts/Dockerfile.smoke
+          platforms: linux/amd64
+          load: true
+          tags: student-tts-local-smoke:py311-cuda128
+          cache-from: type=gha,scope=student-tts-smoke
+          cache-to: type=gha,mode=max,scope=student-tts-smoke
+      - name: Run local CPU smoke preflight
+        if: steps.req.outputs.run == 'true'
+        env:
+          STUDENT_TTS_SMOKE_SKIP_BUILD: "1"
+        run: scripts/gpu_tts/student_tts/local_smoke.sh
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

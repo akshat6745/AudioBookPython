@@ -121,20 +121,27 @@ def _higgs_calibration(tts, rows: list[dict], raw_dir: Path, state: Path, gpu_na
     return chosen.setting, completed
 
 
-def select(work: Path) -> dict:
-    """CPU-only: build or reload the balanced Higgs request manifest on the Volume."""
+def select_from_rows(work: Path, source_rows: list[dict], quotas: dict[str, int] | None = None) -> dict:
+    """Build a manifest from an explicit source adapter (cloud in production, fixtures in preflight)."""
     work = work.resolve()
     manifest_path = work / "request_manifest.jsonl"
     if manifest_path.exists():
         selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
         return {"manifest": dataset.summary(selected), "cached": True}
-    selected = dataset.select_balanced(dataset.candidates(_source_rows()))
+    selected = dataset.select_balanced(source_rows, quotas)
     planned = dataset.write_manifest(manifest_path, selected)
+    return {"manifest": planned, "cached": False}
+
+
+def select(work: Path) -> dict:
+    """CPU-only: build or reload the balanced Higgs request manifest on the Volume."""
+    result = select_from_rows(work, dataset.candidates(_source_rows()))
+    planned = result["manifest"]
     if not 10 <= planned["total_estimated_hours"] <= 20:
         raise RuntimeError(f"selector produced {planned['total_estimated_hours']} h, outside the 10-20 h target")
     if planned["neutral_audio_pct"] > 50:
         raise RuntimeError(f"selector produced {planned['neutral_audio_pct']}% neutral audio")
-    return {"manifest": planned, "cached": False}
+    return result
 
 
 def generate(work: Path, cache: Path) -> dict:
@@ -169,6 +176,20 @@ def generate(work: Path, cache: Path) -> dict:
             "streams": streams, "telemetry": metrics}
 
 
+def dataset_publication_plan(work: Path, prefix: str, accepted: list[dict]) -> list[tuple[Path, str, str]]:
+    """Describe dataset uploads without performing network writes."""
+    files = [
+        (work / row["wav"], f"{prefix}/dataset/{row['wav']}", "audio/wav")
+        for row in accepted
+    ]
+    files.extend(
+        (work / name, f"{prefix}/dataset/{name}",
+         "application/json" if name.endswith(".jsonl") else "text/plain")
+        for name in ("metadata.jsonl", "train_list.txt", "val_list.txt", "OOD_texts.txt")
+    )
+    return files
+
+
 def qa_and_publish(work: Path, prefix: str) -> dict:
     import check_audio
     import verify
@@ -200,13 +221,8 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
     metadata.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in accepted))
     lists = prepare.prepare_lists(work)
     s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
-    for row in accepted:
-        local = work / row["wav"]
-        s3.upload_file(str(local), bucket, f"{prefix}/dataset/{row['wav']}",
-                       ExtraArgs={"ContentType": "audio/wav"})
-    for name in ("metadata.jsonl", "train_list.txt", "val_list.txt", "OOD_texts.txt"):
-        s3.upload_file(str(work / name), bucket, f"{prefix}/dataset/{name}",
-                       ExtraArgs={"ContentType": "application/json" if name.endswith(".jsonl") else "text/plain"})
+    for local, key, content_type in dataset_publication_plan(work, prefix, accepted):
+        s3.upload_file(str(local), bucket, key, ExtraArgs={"ContentType": content_type})
     report = {
         "accepted": len(accepted), "rejected": len(rejected), "passed_hours": round(passed_s / 3600, 2),
         "passed_audio_s_per_wall_s": round(passed_s / max(wall, 0.001), 2),
