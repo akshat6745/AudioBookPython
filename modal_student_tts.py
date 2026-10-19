@@ -41,7 +41,7 @@ cpu_image = base_image.add_local_dir("scripts/gpu_tts", remote_path=ROOT, ignore
 higgs_image = (
     modal.Image.from_registry("lmsysorg/sglang-omni:dev", add_python="3.11")
     .apt_install("ffmpeg", "curl", "ca-certificates")
-    .pip_install("boto3", "numpy")
+    .pip_install("boto3", "numpy", "pyyaml>=6.0")
     .add_local_dir("scripts/gpu_tts", remote_path=ROOT, ignore=IGNORE)
 )
 train_image = (
