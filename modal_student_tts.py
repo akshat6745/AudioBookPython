@@ -111,7 +111,25 @@ def whisper_qa() -> dict:
     _path_setup()
     import pipeline_worker
 
-    return _with_commits(pipeline_worker.qa_and_publish, WORK, R2_PREFIX)
+    return _with_commits(pipeline_worker.qa, WORK)
+
+
+@app.function(image=cpu_image, cpu=8, memory=16384, timeout=3600, retries=gpu_retry, volumes=VOLUMES)
+def finish_qa() -> dict:
+    """Lists from an already finished Whisper pass (metadata.jsonl on the Volume); espeak only, no GPU."""
+    _path_setup()
+    import pipeline_worker
+
+    return _with_commits(pipeline_worker.qa, WORK)
+
+
+@app.function(image=cpu_image, cpu=4, memory=8192, timeout=3 * 3600, retries=gpu_retry,
+              secrets=[SECRET], volumes=VOLUMES)
+def publish_dataset() -> dict:
+    _path_setup()
+    import pipeline_worker
+
+    return pipeline_worker.publish(WORK, R2_PREFIX)
 
 
 def _train(gpu_kind: str) -> dict:
@@ -135,12 +153,30 @@ def train_l4() -> dict:
 
 @app.function(image=cpu_image, cpu=0.25, memory=1024, timeout=24 * 3600)
 def orchestrate(gpu: str) -> dict:
-    result = {}
-    for name, stage in (("selection", select_dataset), ("generation", generate_dataset), ("qa", whisper_qa),
-                        ("training", train_l40s if gpu == "l40s" else train_l4)):
+    """Skips any stage whose outputs are already on the Volume, then trains while R2 publishing runs beside it."""
+    _path_setup()
+    import pipeline_worker
+
+    def run(name: str, stage) -> dict:
         print(f"STAGE start {name}", flush=True)
-        result[name] = stage.remote()
-        print(f"STAGE done {name}: {json.dumps(result[name])[:2000]}", flush=True)
+        out = stage.remote()
+        print(f"STAGE done {name}: {json.dumps(out)[:2000]}", flush=True)
+        return out
+
+    result = {"selection": run("selection", select_dataset)}
+    plan = pipeline_worker.plan_stages(result["selection"]["status"])
+    print(f"STAGE plan {json.dumps(plan)}", flush=True)
+    if plan["generation"] == "gpu":
+        result["generation"] = run("generation", generate_dataset)
+    if plan["qa"] != "skip":
+        result["qa"] = run("qa", whisper_qa if plan["qa"] == "gpu" else finish_qa)
+    else:
+        print("STAGE done qa: skipped, lists already on the volume", flush=True)
+    publishing = publish_dataset.spawn()
+    print("STAGE start publish (in parallel with training)", flush=True)
+    result["training"] = run("training", train_l40s if gpu == "l40s" else train_l4)
+    result["publish"] = publishing.get()
+    print(f"STAGE done publish: {json.dumps(result['publish'])}", flush=True)
     return result
 
 

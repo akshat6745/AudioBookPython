@@ -10,7 +10,7 @@ import pipeline_worker
 import prepare
 import train_worker
 
-MODAL_STAGE_ENTRYPOINTS = ("select", "select_from_rows", "generate", "qa_and_publish",
+MODAL_STAGE_ENTRYPOINTS = ("select", "select_from_rows", "generate", "qa", "publish", "plan_stages",
                            "dataset_publication_plan")
 REPO = Path(__file__).resolve().parents[3]
 GPU_TTS = REPO / "scripts/gpu_tts"
@@ -134,7 +134,7 @@ def test_qa_resumes_saved_verdicts_and_warns_on_small_dataset(tmp_path, monkeypa
     monkeypatch.setattr(pipeline_worker, "dataset_publication_plan", lambda work, prefix, accepted: [])
     monkeypatch.setenv("R2_BUCKET_NAME", "fixture")
 
-    report = pipeline_worker.qa_and_publish(tmp_path, "prefix")
+    report = pipeline_worker.qa(tmp_path)
 
     assert len(checked) == 2  # the clip already in qa_results.jsonl is not re-transcribed
     assert report["accepted"] == 3
@@ -181,7 +181,7 @@ def test_qa_builds_missing_lists_from_a_finished_pass_without_transcribing(tmp_p
     monkeypatch.setattr(pipeline_worker, "dataset_publication_plan", lambda work, prefix, accepted: [])
     monkeypatch.setenv("R2_BUCKET_NAME", "fixture")
 
-    report = pipeline_worker.qa_and_publish(tmp_path, "prefix")
+    report = pipeline_worker.qa(tmp_path)
     assert built and report["accepted"] == 1 and report["lists"] == {"train": 1}
 
 
@@ -304,10 +304,23 @@ def test_relaunch_skips_finished_generation_and_qa(tmp_path, monkeypatch):
     assert pipeline_worker.generate(tmp_path, tmp_path / "cache")["cached"] is True
 
     (tmp_path / "metadata.jsonl").write_text(json.dumps({"id": rid, "duration_s": 7200.0}) + "\n")
-    (tmp_path / "train_list.txt").write_text("x\n")
-    (tmp_path / "val_list.txt").write_text("x\n")
-    qa = pipeline_worker.qa_and_publish(tmp_path, "prefix")
+    for name in pipeline_worker.LISTS:
+        (tmp_path / name).write_text("x\n")
+    qa = pipeline_worker.qa(tmp_path)
     assert qa == {"accepted": 1, "passed_hours": 2.0, "cached": True}
+    assert pipeline_worker.stage_status(tmp_path) == {"generated": True, "qa_done": True, "lists": True}
+
+
+def test_orchestrator_only_pays_for_unfinished_stages():
+    plan = pipeline_worker.plan_stages
+    fresh = {"generated": False, "qa_done": False, "lists": False}
+    assert plan(fresh) == {"generation": "gpu", "qa": "gpu"}
+    assert plan({**fresh, "generated": True}) == {"generation": "skip", "qa": "gpu"}
+    # QA finished but crashed building lists (the KeyError run): lists on CPU, no Higgs, no Whisper
+    assert plan({"generated": True, "qa_done": True, "lists": False}) == {"generation": "skip", "qa": "cpu"}
+    assert plan({"generated": True, "qa_done": True, "lists": True}) == {"generation": "skip", "qa": "skip"}
+    # metadata.jsonl means the WAVs were checked, so generation is never re-run for a finished QA
+    assert plan({"generated": False, "qa_done": True, "lists": True})["generation"] == "skip"
 
 
 def test_balanced_selection_honors_voice_emotion_quotas():

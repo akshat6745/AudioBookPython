@@ -146,9 +146,43 @@ def select_from_rows(work: Path, source_rows, quotas: dict[str, int] | None = No
     return {"manifest": planned, "cached": False}
 
 
+LISTS = ("train_list.txt", "val_list.txt", "OOD_texts.txt")
+
+
+def _generation_complete(work: Path, selected: list[dict]) -> list[dict] | None:
+    """generated.jsonl rows when every selected clip already has its WAV on the Volume, else None."""
+    path = work / "generated.jsonl"
+    if not path.exists():
+        return None
+    generated = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    if {r["id"] for r in generated} >= {_id(r) for r in selected} and all(
+            (work / r["wav"]).exists() for r in generated):
+        return generated
+    return None
+
+
+def stage_status(work: Path) -> dict:
+    """Which stages already have their outputs on the Volume, so the orchestrator can skip their GPUs."""
+    work = work.resolve()
+    manifest = work / "request_manifest.jsonl"
+    selected = [json.loads(line) for line in manifest.read_text().splitlines() if line.strip()] \
+        if manifest.exists() else []
+    return {"generated": bool(selected) and _generation_complete(work, selected) is not None,
+            "qa_done": (work / "metadata.jsonl").exists(),
+            "lists": all((work / name).exists() for name in LISTS)}
+
+
+def plan_stages(status: dict) -> dict:
+    """generation: 'gpu' | 'skip'; qa: 'gpu' (Whisper) | 'cpu' (lists from finished QA) | 'skip'."""
+    qa = "skip" if status["qa_done"] and status["lists"] else ("cpu" if status["qa_done"] else "gpu")
+    generation = "skip" if status["generated"] or qa != "gpu" else "gpu"
+    return {"generation": generation, "qa": qa}
+
+
 def select(work: Path) -> dict:
     """CPU-only: build or reload the balanced Higgs request manifest on the Volume."""
     result = select_from_rows(work, lambda: dataset.candidates(_source_rows()))
+    result["status"] = stage_status(work)
     planned = result["manifest"]
     if not 10 <= planned["total_estimated_hours"] <= 20:
         raise RuntimeError(f"selector produced {planned['total_estimated_hours']} h, outside the 10-20 h target")
@@ -164,13 +198,10 @@ def generate(work: Path, cache: Path) -> dict:
     if not manifest_path.exists():
         raise RuntimeError("request_manifest.jsonl missing; run select_dataset first")
     selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
-    generated_path = work / "generated.jsonl"
-    if generated_path.exists():
-        generated = [json.loads(line) for line in generated_path.read_text().splitlines() if line.strip()]
-        if {r["id"] for r in generated} >= {_id(r) for r in selected} and all(
-                (work / r["wav"]).exists() for r in generated):
-            print(f"GENERATION reusing {len(generated)} clips already on the volume; Higgs not started", flush=True)
-            return {"manifest": dataset.summary(selected), "generated": len(generated), "cached": True}
+    generated = _generation_complete(work, selected)
+    if generated is not None:
+        print(f"GENERATION reusing {len(generated)} clips already on the volume; Higgs not started", flush=True)
+        return {"manifest": dataset.summary(selected), "generated": len(generated), "cached": True}
     cr.start_higgs(cache)
     try:
         import synth
@@ -244,21 +275,25 @@ def _batch_transcriber():
     return run
 
 
-def qa_and_publish(work: Path, prefix: str) -> dict:
-    import check_audio
-    import verify
+def qa(work: Path) -> dict:
+    """Whisper-check every generated clip, then write metadata.jsonl, the StyleTTS2 lists and qa_report.json.
 
+    Reuses a finished pass: with metadata.jsonl present only the lists are (re)built, which needs no GPU.
+    """
     work = work.resolve()
     metadata = work / "metadata.jsonl"
     if metadata.exists():  # written only after a full transcription pass
         accepted = [json.loads(line) for line in metadata.read_text().splitlines() if line.strip()]
         summary = {"accepted": len(accepted),
                    "passed_hours": round(sum(r["duration_s"] for r in accepted) / 3600, 2), "cached": True}
-        if all((work / name).exists() for name in ("train_list.txt", "val_list.txt")):
+        if all((work / name).exists() for name in LISTS):
             print(f"QA reusing a finished pass: {len(accepted)} accepted clips and their lists", flush=True)
             return summary
         print(f"QA reusing {len(accepted)} accepted clips from metadata.jsonl; building the lists", flush=True)
-        return _publish(work, prefix, accepted, summary)
+        return _finish(work, summary)
+    import check_audio
+    import verify
+
     rows = [json.loads(line) for line in (work / "generated.jsonl").read_text().splitlines() if line.strip()]
     results_path = work / "qa_results.jsonl"  # one verdict per clip, appended as it is checked, so a rerun resumes
     done = {}
@@ -299,22 +334,32 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
     if passed_s < 10 * 3600:
         print(f"WARNING: QA passed only {passed_s / 3600:.2f} h (target 10-20 h); training on it anyway", flush=True)
     metadata.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in accepted))
-    return _publish(work, prefix, accepted, {
+    return _finish(work, {
         "accepted": len(accepted), "rejected": len(rejected), "passed_hours": round(passed_s / 3600, 2),
         "passed_audio_s_per_wall_s": round(passed_s / max(wall, 0.001), 2),
         "gpu": monitor.summary(), "acceptance_by_generation_streams": by_streams,
     })
 
 
-def _publish(work: Path, prefix: str, accepted: list[dict], report: dict) -> dict:
-    """StyleTTS2 lists on the Volume, then the accepted dataset and QA report to R2."""
+def _finish(work: Path, report: dict) -> dict:
+    """StyleTTS2 lists and the QA report on the Volume; uploading to R2 is publish()'s job."""
     report = {**report, "lists": prepare.prepare_lists(work)}
-    s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
-    uploads = dataset_publication_plan(work, prefix, accepted)
-    t_up = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=32) as pool:  # ~5k small WAVs; one at a time took tens of GPU-minutes
-        list(pool.map(lambda f: s3.upload_file(str(f[0]), bucket, f[1], ExtraArgs={"ContentType": f[2]}), uploads))
-    print(f"QA uploaded {len(uploads)} dataset files in {time.perf_counter() - t_up:.0f}s", flush=True)
-    s3.put_object(Bucket=bucket, Key=f"{prefix}/dataset/qa_report.json",
-                  Body=json.dumps(report, indent=2).encode(), ContentType="application/json")
+    (work / "qa_report.json").write_text(json.dumps(report, indent=2))
     return report
+
+
+def publish(work: Path, prefix: str) -> dict:
+    """Upload the accepted dataset, its lists and the QA report to R2. Training only needs the Volume, so
+    the orchestrator runs this on a CPU container alongside training."""
+    work = work.resolve()
+    accepted = [json.loads(line) for line in (work / "metadata.jsonl").read_text().splitlines() if line.strip()]
+    uploads = dataset_publication_plan(work, prefix, accepted)
+    if (work / "qa_report.json").exists():
+        uploads.append((work / "qa_report.json", f"{prefix}/dataset/qa_report.json", "application/json"))
+    s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
+    t0 = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=32) as pool:  # ~5k small WAVs; one at a time took tens of minutes
+        list(pool.map(lambda f: s3.upload_file(str(f[0]), bucket, f[1], ExtraArgs={"ContentType": f[2]}), uploads))
+    seconds = round(time.perf_counter() - t0)
+    print(f"PUBLISH uploaded {len(uploads)} dataset files to {prefix}/dataset in {seconds}s", flush=True)
+    return {"uploaded": len(uploads), "seconds": seconds}

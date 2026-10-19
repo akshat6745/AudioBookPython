@@ -28,7 +28,7 @@ PREFIX = "student_tts/styletts2-eye-v1-smoke"
 QUOTAS = {"neutral": 2, "anger": 2, "fear": 2}
 
 MODULE_CONTRACTS = {
-    "pipeline_worker": ("select", "select_from_rows", "generate", "qa_and_publish", "dataset_publication_plan"),
+    "pipeline_worker": ("select", "select_from_rows", "generate", "qa", "publish", "plan_stages", "dataset_publication_plan"),
     "prepare": ("prepare_lists", "write_config", "build_config"),
     "train_worker": ("train", "training_command", "training_environment"),
     "calibration": ("choose_higgs", "choose_training", "next_smaller_batch"),
@@ -49,7 +49,7 @@ def check_contracts() -> None:
             assert callable(value), f"{module_name}.{attribute} is missing or not callable"
 
     modal_module = importlib.import_module("modal_student_tts")
-    for name in ("select_dataset", "generate_dataset", "whisper_qa", "train_l40s", "train_l4", "orchestrate"):
+    for name in ("select_dataset", "generate_dataset", "whisper_qa", "finish_qa", "publish_dataset", "train_l40s", "train_l4", "orchestrate"):
         assert hasattr(modal_module, name), f"modal_student_tts.{name} is missing"
 
     tree = ast.parse((REPO / "modal_student_tts.py").read_text())
