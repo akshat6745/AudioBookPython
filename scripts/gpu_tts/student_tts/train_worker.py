@@ -15,10 +15,13 @@ import prepare
 import telemetry
 
 STYLE_ROOT = Path("/opt/styletts2")
-CANDIDATES = (8, 12, 16, 24)
+CANDIDATES = calibration.TRAINING_BATCHES[1:]  # probe upward from 2; 1 is only an OOM fallback
 CALIBRATION_BUDGET_S = 15 * 60
 CALIBRATION_STEPS = 25
-EPOCHS = 15
+# ~11 h of audio x 6 epochs ~= 66 audio-hours seen, more than upstream's 1 h x 50 epochs. 15 epochs projected
+# to 15-30 L40S hours, past the 23 h function cap.
+EPOCHS = int(os.environ.get("STUDENT_TTS_EPOCHS", "6"))
+JOINT_EPOCH_COST = 1.5  # assumed slowdown of SLM adversarial epochs; only used for the logged estimate
 
 
 def log(msg: str) -> None:
@@ -37,6 +40,17 @@ def training_environment(max_steps: int, amp: str, workers: int = 8, prefetch: i
         "TRAIN_PREFETCH": str(prefetch), "STYLETTS_AMP": amp,
         "PYTHONUNBUFFERED": "1", "TOKENIZERS_PARALLELISM": "false",
     }
+
+
+def training_estimate(data: Path, batch: int, step_s: float, epochs: int) -> dict:
+    """Projected wall time from the calibration step time, logged before the paid full run starts."""
+    clips = sum(1 for line in (data / "train_list.txt").read_text().splitlines() if line.strip())
+    steps = -(-clips // batch)
+    joint = epochs - round(epochs * 0.6)
+    epoch_h = steps * step_s / 3600
+    hours = epoch_h * (epochs - joint) + epoch_h * JOINT_EPOCH_COST * joint
+    return {"clips": clips, "batch": batch, "steps_per_epoch": steps, "step_s": step_s, "epochs": epochs,
+            "projected_hours": round(hours, 2)}
 
 
 def _gpu_identity() -> tuple[str, float]:
@@ -110,6 +124,18 @@ def _calibrate(data: Path, output: Path, state: Path, gpu_name: str, total_vram:
         log("CALIBRATION " + json.dumps({**m.__dict__, "amp": amp, "headroom_pct": round(m.headroom_pct, 1)}))
         if not stable or m.headroom_pct < 7.5:
             break  # larger batches only use more memory
+    if not any(m.stable for m in trace):
+        log("batch 2 did not fit; probing batch 1")
+        prepare.write_config(config, data, output / "calibration-output", 1, epochs=1, heavy=True)
+        with telemetry.Monitor(lambda: 1, interval_s=2) as monitor:
+            code, metrics, logs = _run(config, CALIBRATION_STEPS, 420, amp)
+        stable = code == 0 and bool(metrics) and not _is_oom(logs)
+        trace.append(calibration.Measurement(
+            setting=1, stable=stable, throughput=round(metrics.get("examples_per_s", 0), 3),
+            vram_used_gb=round(metrics.get("peak_vram_gb", total_vram), 2), vram_total_gb=round(total_vram, 2),
+            utilization_pct=monitor.summary().get("median_utilization_pct", 0),
+            step_s=round(metrics.get("step_s", 0), 3), error="" if stable else f"exit-{code}",
+        ))
     chosen = calibration.choose_training(trace)
     calibration.save_choice(state, gpu_name, "styletts2", chosen, trace, extra={"amp": amp})
     log(f"CALIBRATION_CHOICE batch={chosen.setting} amp={amp} examples/s={chosen.throughput} "
@@ -142,9 +168,11 @@ def train(work: Path, cache: Path, prefix: str, gpu_kind: str) -> dict:
     patch(STYLE_ROOT)
     gpu_name, total_vram = _gpu_identity()
     log(f"GPU {gpu_name} {total_vram:.1f} GB; data {work}")
-    default_amp = "bf16" if gpu_kind == "L40S" else "fp16"
-    chosen = _calibrate(work, output, cache / "calibration.json", gpu_name, total_vram, default_amp)
+    # StyleTTS2's STFT losses reject bf16/fp16 tensors and its README warns of NaN losses under mixed
+    # precision, so train in fp32 with TF32 matmuls instead of spending a probe discovering that.
+    chosen = _calibrate(work, output, cache / "calibration.json", gpu_name, total_vram, "off")
     batch, amp = int(chosen["setting"]), chosen["amp"]
+    log("TRAIN_ESTIMATE " + json.dumps(training_estimate(work, batch, chosen.get("step_s", 0), EPOCHS)))
     underfed = chosen.get("utilization_pct", 100) < 85
     workers, prefetch = (12, 6) if underfed else (8, 4)
     config = output.parent / "config_ft.yml"  # train_finetune.py writes the trained copy to output/config_ft.yml

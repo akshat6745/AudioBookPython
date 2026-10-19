@@ -45,7 +45,10 @@ def choose_training(measurements: Iterable[Measurement], min_headroom_pct: float
     return max(good, key=lambda m: (m.throughput, m.setting))
 
 
-def next_smaller_batch(failed: int, candidates: tuple[int, ...] = (8, 12, 16, 24)) -> int:
+TRAINING_BATCHES = (1, 2, 4, 6, 8)  # StyleTTS2's own default is 8 split across four GPUs, about 2 per GPU
+
+
+def next_smaller_batch(failed: int, candidates: tuple[int, ...] = TRAINING_BATCHES) -> int:
     lower = [b for b in candidates if b < failed]
     if not lower:
         raise RuntimeError(f"OOM at minimum physical batch {failed}")

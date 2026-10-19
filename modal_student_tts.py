@@ -56,6 +56,9 @@ train_image = (
 
 app = modal.App("student-tts-eye-v1")
 gpu_retry = modal.Retries(max_retries=2, backoff_coefficient=2.0, initial_delay=10.0)
+# Training resumes from its last epoch checkpoint, so one retry covers preemption; more only repeat
+# deterministic failures at L40S prices.
+train_retry = modal.Retries(max_retries=1, initial_delay=10.0)
 VOLUMES = {str(CACHE): VOLUME}
 
 
@@ -118,13 +121,13 @@ def _train(gpu_kind: str) -> dict:
     return _with_commits(train_worker.train, WORK, CACHE, R2_PREFIX, gpu_kind)
 
 
-@app.function(image=train_image, gpu="L40S", cpu=16, memory=65536, timeout=24 * 3600, retries=gpu_retry,
+@app.function(image=train_image, gpu="L40S", cpu=16, memory=65536, timeout=24 * 3600, retries=train_retry,
               secrets=[SECRET], volumes=VOLUMES)
 def train_l40s() -> dict:
     return _train("L40S")
 
 
-@app.function(image=train_image, gpu="L4", cpu=16, memory=65536, timeout=24 * 3600, retries=gpu_retry,
+@app.function(image=train_image, gpu="L4", cpu=16, memory=65536, timeout=24 * 3600, retries=train_retry,
               secrets=[SECRET], volumes=VOLUMES)
 def train_l4() -> dict:
     return _train("L4")

@@ -150,6 +150,16 @@ def test_monitor_needs_real_gpu_output_and_stops_on_tracebacks():
     assert m.observe("ModuleNotFoundError: No module named 'yaml'") == "failed"
 
 
+def test_handoff_waits_for_qa_to_return_before_stopping():
+    import handoff_student_tts as h
+
+    assert h.observe('GPU_TELEMETRY {"gpu": "NVIDIA L4", "queue_depth": 3480}') is None
+    assert h.observe("STAGE start qa") is None
+    assert h.observe('STAGE done qa: {"accepted": 5100}') == "qa-finished"
+    assert h.observe("[train 23:59:01] GPU NVIDIA L40S 44.4 GB") == "qa-finished"  # attached after QA ended
+    assert h.observe("RuntimeError: QA left only 9.10 h; refusing an undersized training set") == "qa-failed"
+
+
 def test_queue_records_the_detached_app_id(tmp_path, monkeypatch):
     import types
 
@@ -212,9 +222,67 @@ def test_training_selects_fastest_stable_with_headroom():
 
 
 def test_training_oom_falls_back_one_supported_step():
-    assert calibration.next_smaller_batch(24) == 16
-    assert calibration.next_smaller_batch(16) == 12
-    assert calibration.next_smaller_batch(12) == 8
+    assert calibration.next_smaller_batch(8) == 6
+    assert calibration.next_smaller_batch(4) == 2
+    assert calibration.next_smaller_batch(2) == 1
+    try:
+        calibration.next_smaller_batch(1)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("batch 1 has nothing smaller to fall back to")
+
+
+def test_training_probes_small_batches_and_estimates_wall_time(tmp_path):
+    assert train_worker.CANDIDATES[0] == 2 and max(train_worker.CANDIDATES) <= 8
+    (tmp_path / "train_list.txt").write_text("".join(f"raw/{i}.wav|p|0\n" for i in range(100)))
+    est = train_worker.training_estimate(tmp_path, batch=4, step_s=3.6, epochs=6)
+    assert est["steps_per_epoch"] == 25
+    # 4 plain epochs at 0.025 h plus 2 joint epochs at 1.5x
+    assert est["projected_hours"] == round(0.025 * 4 + 0.025 * 1.5 * 2, 2)
+
+
+def test_cuda_patch_applies_to_pinned_styletts2(tmp_path):
+    import shutil
+
+    import pytest
+
+    import patch_styletts2_cuda
+
+    upstream = Path("/opt/styletts2")
+    if not (upstream / "train_finetune.py").exists():
+        pytest.skip("StyleTTS2 checkout only exists in the Docker preflight image")
+    for name in ("train_finetune.py", "meldataset.py", "optimizers.py"):
+        shutil.copy(upstream / name, tmp_path / name)
+    patch_styletts2_cuda.patch(tmp_path)
+    patch_styletts2_cuda.patch(tmp_path)  # train_l40s re-runs it on retries
+    patched = (tmp_path / "train_finetune.py").read_text()
+    compile(patched, "train_finetune.py", "exec")
+    assert "TRAIN_METRICS" in patched and "num_workers=train_workers" in patched
+
+
+def test_relaunch_skips_finished_generation_and_qa(tmp_path, monkeypatch):
+    import json
+
+    row = {"novel": "n", "chapter": 1, "paragraph": 0, "chunk": 0, "voice": "narrator",
+           "tagged_text": "hi", "emotion": "neutral", "estimated_s": 2}
+    rid = pipeline_worker._id(row)
+    (tmp_path / "request_manifest.jsonl").write_text(json.dumps(row) + "\n")
+    (tmp_path / "raw").mkdir()
+    (tmp_path / "raw" / f"{rid}.wav").write_bytes(b"")
+    (tmp_path / "generated.jsonl").write_text(json.dumps({**row, "id": rid, "wav": f"raw/{rid}.wav"}) + "\n")
+
+    def no_higgs(cache):
+        raise AssertionError("every clip exists; the Higgs server must not start")
+
+    monkeypatch.setattr(pipeline_worker.cr, "start_higgs", no_higgs)
+    assert pipeline_worker.generate(tmp_path, tmp_path / "cache")["cached"] is True
+
+    (tmp_path / "metadata.jsonl").write_text(json.dumps({"id": rid, "duration_s": 7200.0}) + "\n")
+    (tmp_path / "train_list.txt").write_text("x\n")
+    (tmp_path / "val_list.txt").write_text("x\n")
+    qa = pipeline_worker.qa_and_publish(tmp_path, "prefix")
+    assert qa == {"accepted": 1, "passed_hours": 2.0, "cached": True}
 
 
 def test_balanced_selection_honors_voice_emotion_quotas():

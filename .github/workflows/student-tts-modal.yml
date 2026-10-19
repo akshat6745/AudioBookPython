@@ -17,7 +17,7 @@ concurrency:
 jobs:
   queue:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300  # a handoff can wait ~2.5 h for the old app's QA before launching
     env:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
@@ -27,7 +27,8 @@ jobs:
           persist-credentials: false
       - name: Check request
         id: req
-        run: python -c "import json; print('run=' + str(json.load(open('student_tts_request.json')).get('run') is True).lower())" >> "$GITHUB_OUTPUT"
+        run: |
+          python -c "import json; r = json.load(open('student_tts_request.json')); print('run=' + str(r.get('run') is True).lower()); print('handoff=' + (r.get('handoff_from_app') or ''))" >> "$GITHUB_OUTPUT"
       - name: Set up CPU smoke builder
         if: steps.req.outputs.run == 'true'
         uses: docker/setup-buildx-action@v3
@@ -51,6 +52,9 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install modal
+      - name: Wait for the previous app's QA, then stop it
+        if: steps.req.outputs.run == 'true' && steps.req.outputs.handoff != ''
+        run: python scripts/gpu_tts/student_tts/handoff_student_tts.py "${{ steps.req.outputs.handoff }}"
       - name: Start detached student TTS pipeline
         if: steps.req.outputs.run == 'true'
         run: python scripts/gpu_tts/student_tts/queue_student_tts.py student_tts_request.json

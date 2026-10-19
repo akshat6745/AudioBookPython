@@ -164,6 +164,13 @@ def generate(work: Path, cache: Path) -> dict:
     if not manifest_path.exists():
         raise RuntimeError("request_manifest.jsonl missing; run select_dataset first")
     selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
+    generated_path = work / "generated.jsonl"
+    if generated_path.exists():
+        generated = [json.loads(line) for line in generated_path.read_text().splitlines() if line.strip()]
+        if {r["id"] for r in generated} >= {_id(r) for r in selected} and all(
+                (work / r["wav"]).exists() for r in generated):
+            print(f"GENERATION reusing {len(generated)} clips already on the volume; Higgs not started", flush=True)
+            return {"manifest": dataset.summary(selected), "generated": len(generated), "cached": True}
     cr.start_higgs(cache)
     try:
         import synth
@@ -242,6 +249,11 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
     import verify
 
     work = work.resolve()
+    if all((work / name).exists() for name in ("metadata.jsonl", "train_list.txt", "val_list.txt")):
+        accepted = [json.loads(line) for line in (work / "metadata.jsonl").read_text().splitlines() if line.strip()]
+        print(f"QA reusing a finished pass: {len(accepted)} accepted clips and their lists", flush=True)
+        return {"accepted": len(accepted), "passed_hours": round(sum(r["duration_s"] for r in accepted) / 3600, 2),
+                "cached": True}
     rows = [json.loads(line) for line in (work / "generated.jsonl").read_text().splitlines() if line.strip()]
     results_path = work / "qa_results.jsonl"  # one verdict per clip, appended as it is checked, so a rerun resumes
     done = {}
@@ -285,8 +297,11 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
     metadata.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in accepted))
     lists = prepare.prepare_lists(work)
     s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
-    for local, key, content_type in dataset_publication_plan(work, prefix, accepted):
-        s3.upload_file(str(local), bucket, key, ExtraArgs={"ContentType": content_type})
+    uploads = dataset_publication_plan(work, prefix, accepted)
+    t_up = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=32) as pool:  # ~5k small WAVs; one at a time took tens of GPU-minutes
+        list(pool.map(lambda f: s3.upload_file(str(f[0]), bucket, f[1], ExtraArgs={"ContentType": f[2]}), uploads))
+    print(f"QA uploaded {len(uploads)} dataset files in {time.perf_counter() - t_up:.0f}s", flush=True)
     report = {
         "accepted": len(accepted), "rejected": len(rejected), "passed_hours": round(passed_s / 3600, 2),
         "passed_audio_s_per_wall_s": round(passed_s / max(wall, 0.001), 2),
