@@ -1,6 +1,6 @@
 {
   "run": true,
   "gpu": "l40s",
-  "note": "Training run: reuse attempt-4 dataset and QA metadata; lists on CPU, publish beside training",
-  "attempt": 7
+  "note": "Training run: reuse dataset + lists; training image now installs pandas",
+  "attempt": 8
 }
