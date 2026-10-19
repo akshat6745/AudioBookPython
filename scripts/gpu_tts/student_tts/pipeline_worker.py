@@ -36,10 +36,11 @@ def _write_wav(path: Path, audio: np.ndarray, sr: int) -> None:
         out.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
 
 
-def _source_rows() -> list[dict]:
+def _source_rows(fetch_workers: int = 32) -> list[dict]:
     s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
     rows = []
     for novel in cr.NOVELS:
+        t0 = time.perf_counter()
         tag_key = f"{cr.ML_PREFIX}/tags/{novel}_{cr.TAG_MODEL}.jsonl"
         tags = [json.loads(line) for line in
                 s3.get_object(Bucket=bucket, Key=tag_key)["Body"].read().decode().splitlines() if line.strip()]
@@ -50,14 +51,21 @@ def _source_rows() -> list[dict]:
             "SELECT chapter_number, r2_content_path FROM chapters "
             "WHERE novel_id = ? AND r2_content_path IS NOT NULL ORDER BY chapter_number", [novel],
         )
-        for chapter in chapters:
-            ch = int(chapter["chapter_number"])
-            text = s3.get_object(Bucket=bucket, Key=chapter["r2_content_path"])["Body"].read()
-            paragraphs = [p.strip() for p in cr.gw.decode_chapter_bytes(text).split("\n\n") if p.strip()]
-            for idx, paragraph in enumerate(paragraphs):
-                if idx in by_ch.get(ch, {}):
-                    rows.append({"novel": novel, "chapter": ch, "paragraph": idx,
-                                 "text": paragraph, "tag": by_ch[ch][idx]})
+        chapters = [c for c in chapters if int(c["chapter_number"]) in by_ch]
+
+        def fetch(chapter: dict) -> tuple[int, bytes]:
+            body = s3.get_object(Bucket=bucket, Key=chapter["r2_content_path"])["Body"].read()
+            return int(chapter["chapter_number"]), body
+
+        with ThreadPoolExecutor(max_workers=fetch_workers) as pool:
+            for ch, text in pool.map(fetch, chapters):
+                paragraphs = [p.strip() for p in cr.gw.decode_chapter_bytes(text).split("\n\n") if p.strip()]
+                for idx, paragraph in enumerate(paragraphs):
+                    if idx in by_ch[ch]:
+                        rows.append({"novel": novel, "chapter": ch, "paragraph": idx,
+                                     "text": paragraph, "tag": by_ch[ch][idx]})
+        print(f"SELECT source {novel}: {len(chapters)} chapters, {len(rows)} rows so far, "
+              f"{time.perf_counter() - t0:.0f}s", flush=True)
     return rows
 
 
@@ -121,21 +129,26 @@ def _higgs_calibration(tts, rows: list[dict], raw_dir: Path, state: Path, gpu_na
     return chosen.setting, completed
 
 
-def select_from_rows(work: Path, source_rows: list[dict], quotas: dict[str, int] | None = None) -> dict:
-    """Build a manifest from an explicit source adapter (cloud in production, fixtures in preflight)."""
+def select_from_rows(work: Path, source_rows, quotas: dict[str, int] | None = None) -> dict:
+    """Build a manifest from a source adapter (cloud in production, fixtures in preflight).
+
+    source_rows may be a callable so a cached manifest skips fetching the sources entirely.
+    """
     work = work.resolve()
     manifest_path = work / "request_manifest.jsonl"
     if manifest_path.exists():
         selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
+        print(f"SELECT reusing cached manifest: {len(selected)} clips", flush=True)
         return {"manifest": dataset.summary(selected), "cached": True}
-    selected = dataset.select_balanced(source_rows, quotas)
+    rows = source_rows() if callable(source_rows) else source_rows
+    selected = dataset.select_balanced(rows, quotas)
     planned = dataset.write_manifest(manifest_path, selected)
     return {"manifest": planned, "cached": False}
 
 
 def select(work: Path) -> dict:
     """CPU-only: build or reload the balanced Higgs request manifest on the Volume."""
-    result = select_from_rows(work, dataset.candidates(_source_rows()))
+    result = select_from_rows(work, lambda: dataset.candidates(_source_rows()))
     planned = result["manifest"]
     if not 10 <= planned["total_estimated_hours"] <= 20:
         raise RuntimeError(f"selector produced {planned['total_estimated_hours']} h, outside the 10-20 h target")

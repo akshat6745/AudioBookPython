@@ -112,6 +112,19 @@ def test_local_selection_adapter_persists_and_reuses_manifest(tmp_path):
     assert second == {**first, "cached": True}
 
 
+def test_cached_manifest_never_fetches_sources(tmp_path, monkeypatch):
+    (tmp_path / "request_manifest.jsonl").write_text(
+        '{"voice": "narrator", "emotion": "neutral", "estimated_s": 2}\n')
+
+    def fail():
+        raise AssertionError("a cached manifest must not re-download R2/D1 sources")
+
+    monkeypatch.setattr(pipeline_worker, "_source_rows", fail)
+    monkeypatch.setattr(pipeline_worker.dataset, "summary",
+                        lambda rows: {"clips": len(rows), "total_estimated_hours": 12.0, "neutral_audio_pct": 33.0})
+    assert pipeline_worker.select(tmp_path)["cached"] is True
+
+
 def test_training_command_and_environment_are_preflightable(tmp_path):
     config = tmp_path / "config.yml"
     assert train_worker.training_command(config)[1:] == [
