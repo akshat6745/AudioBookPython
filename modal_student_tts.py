@@ -30,7 +30,7 @@ IGNORE = ["**/__pycache__/**", "**/outputs/**", "**/logs/**", "**/data/**"]
 
 base_image = (
     modal.Image.from_registry("nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04", add_python="3.11")
-    .apt_install("ffmpeg", "espeak-ng", "libsndfile1", "git", "build-essential")
+    .apt_install("ffmpeg", "espeak-ng", "libsndfile1", "git", "build-essential", "clang")
     .pip_install(
         "boto3>=1.35", "numpy>=2.0,<2.3", "soundfile>=0.12", "pyyaml>=6.0", "phonemizer>=3.3",
         "torch==2.7.1", "torchaudio==2.7.1", "transformers>=4.53,<5", "accelerate>=1.8",
