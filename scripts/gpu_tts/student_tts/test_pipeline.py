@@ -124,7 +124,8 @@ def test_qa_resumes_saved_verdicts_and_warns_on_small_dataset(tmp_path, monkeypa
         json.dumps({**rows[0], "duration_s": 2.0, "qa": {"ok": True}}) + "\n")
     checked = []
     monkeypatch.setitem(sys.modules, "check_audio", types.SimpleNamespace(
-        transcribe_setup=lambda: (None, None), read_wav=lambda path: (np.zeros(48000, np.float32), 24000)))
+        transcribe_setup=lambda: ("fake", lambda audio, sr: "hello"),
+        read_wav=lambda path: (np.zeros(48000, np.float32), 24000)))
     monkeypatch.setitem(sys.modules, "verify", types.SimpleNamespace(
         check_clip=lambda text, audio, sr, transcribe: checked.append(text) or {"ok": True}))
     s3 = types.SimpleNamespace(upload_file=lambda *a, **k: None, put_object=lambda **k: None)

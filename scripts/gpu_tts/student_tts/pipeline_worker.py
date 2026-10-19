@@ -203,6 +203,40 @@ def dataset_publication_plan(work: Path, prefix: str, accepted: list[dict]) -> l
     return files
 
 
+QA_BATCH = 32  # clips per Whisper call; every clip is <= 16 s, inside Whisper's 30 s window
+
+
+def _to_16k(clip: np.ndarray, sr: int) -> np.ndarray:
+    if sr == 16000:
+        return clip
+    idx = np.linspace(0, len(clip) - 1, int(len(clip) * 16000 / sr))
+    return np.interp(idx, np.arange(len(clip)), clip).astype(np.float32)
+
+
+def _batch_transcriber():
+    """fn(list of (audio, sr)) -> transcripts; one batched Whisper call on CUDA, clip by clip elsewhere."""
+    import check_audio
+
+    try:
+        import torch
+        cuda = torch.cuda.is_available()
+    except ImportError:
+        cuda = False
+    if not cuda:
+        one = check_audio.transcribe_setup()[1]
+        return lambda clips: [one(audio, sr) for audio, sr in clips]
+    from transformers import pipeline
+
+    pipe = pipeline("automatic-speech-recognition", model=check_audio.WHISPER_TOKENIZER, device=0,
+                    torch_dtype=torch.float16)
+
+    def run(clips):
+        inputs = [{"raw": _to_16k(audio, sr), "sampling_rate": 16000} for audio, sr in clips]
+        return [o["text"] for o in pipe(inputs, batch_size=len(inputs), generate_kwargs={"language": "en"})]
+
+    return run
+
+
 def qa_and_publish(work: Path, prefix: str) -> dict:
     import check_audio
     import verify
@@ -220,17 +254,23 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
     accepted = [r for r in done.values() if r["qa"]["ok"]]
     rejected = [r for r in done.values() if not r["qa"]["ok"]]
     todo = [r for r in rows if r["id"] not in done]
-    transcribe = check_audio.transcribe_setup()[1] if todo else None
+    transcribe_batch = _batch_transcriber() if todo else None
     t0 = time.perf_counter()
     with telemetry.Monitor(lambda: len(rows) - len(accepted) - len(rejected)) as monitor, \
-            open(results_path, "a") as results:
-        for row in todo:
-            audio, sr = check_audio.read_wav(work / row["wav"])
-            verdict = verify.check_clip(row["text"], audio, sr, transcribe)
-            checked = {**row, "duration_s": round(len(audio) / sr, 3), "qa": verdict}
-            (accepted if verdict["ok"] else rejected).append(checked)
-            results.write(json.dumps(checked, ensure_ascii=False) + "\n")
+            open(results_path, "a") as results, ThreadPoolExecutor(max_workers=8) as io:
+        for start in range(0, len(todo), QA_BATCH):
+            batch = todo[start:start + QA_BATCH]
+            clips = list(io.map(lambda r: check_audio.read_wav(work / r["wav"]), batch))
+            heard = transcribe_batch(clips)
+            for row, (audio, sr), text in zip(batch, clips, heard):
+                verdict = verify.check_clip(row["text"], audio, sr, lambda *_, t=text: t)
+                checked = {**row, "duration_s": round(len(audio) / sr, 3), "qa": verdict}
+                (accepted if verdict["ok"] else rejected).append(checked)
+                results.write(json.dumps(checked, ensure_ascii=False) + "\n")
             results.flush()
+            print(f"QA {len(accepted) + len(rejected)}/{len(rows)} checked, {len(rejected)} rejected, "
+                  f"{(len(accepted) + len(rejected) - len(done)) / max(time.perf_counter() - t0, 0.001):.1f} clips/s",
+                  flush=True)
     wall = time.perf_counter() - t0
     passed_s = sum(r["duration_s"] for r in accepted)
     by_streams: dict[int, dict[str, float]] = {}
