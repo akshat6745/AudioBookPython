@@ -43,11 +43,19 @@ jobs:
           tags: student-tts-local-smoke:py311-cuda128
           cache-from: type=gha,scope=student-tts-smoke
           cache-to: type=gha,mode=max,scope=student-tts-smoke
-      - name: Run local CPU smoke preflight
+      - name: Cache Hugging Face downloads for the CPU training smoke
+        if: steps.req.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/student-tts-hf
+          key: student-tts-hf-styletts2-libritts-wavlm-v1
+      - name: Run local CPU smoke preflight (tests, pipeline wiring, one real StyleTTS2 CPU epoch + resume + samples)
         if: steps.req.outputs.run == 'true'
         env:
           STUDENT_TTS_SMOKE_SKIP_BUILD: "1"
-        run: scripts/gpu_tts/student_tts/local_smoke.sh
+        run: |
+          mkdir -p ~/.cache/student-tts-hf
+          STUDENT_TTS_HF_CACHE_HOST="$HOME/.cache/student-tts-hf" scripts/gpu_tts/student_tts/local_smoke.sh
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

@@ -39,6 +39,7 @@ COPY scripts/gpu_tts /root/gpu_tts
 COPY scripts/gpu_tts /workspace/repo/scripts/gpu_tts
 COPY modal_student_tts.py student_tts_request.json /workspace/repo/
 
+ENV TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 ENV PYTHONPATH=/workspace/repo:/root/gpu_tts/audiobook:/root/gpu_tts/student_tts:/root/gpu_tts
 
 CMD ["python", "scripts/gpu_tts/student_tts/local_smoke.py"]

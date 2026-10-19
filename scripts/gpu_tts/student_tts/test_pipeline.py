@@ -249,17 +249,83 @@ def test_training_selects_fastest_stable_with_headroom():
 def test_training_oom_falls_back_one_supported_step():
     assert calibration.next_smaller_batch(8) == 6
     assert calibration.next_smaller_batch(4) == 2
-    assert calibration.next_smaller_batch(2) == 1
     try:
-        calibration.next_smaller_batch(1)
+        calibration.next_smaller_batch(2)
     except RuntimeError:
         pass
     else:
-        raise AssertionError("batch 1 has nothing smaller to fall back to")
+        raise AssertionError("batch 1 breaks StyleTTS2's diffusion/SLM losses, so 2 is the floor")
+
+
+def _fake_calibration(monkeypatch, tmp_path, outcomes):
+    """Run train_worker._calibrate with _run replaced: outcomes maps batch -> (code, metrics, logs)."""
+    import pytest
+
+    seen = []
+
+    def fake_run(config, steps, timeout_s, amp, workers=8, prefetch=4):
+        batch = int(__import__("yaml").safe_load(config.read_text())["batch_size"])
+        seen.append(batch)
+        return outcomes[batch]
+
+    class Monitor:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def summary(self):
+            return {"median_utilization_pct": 90}
+
+    monkeypatch.setattr(train_worker, "_run", fake_run)
+    monkeypatch.setattr(train_worker.prepare, "write_config",
+                        lambda path, data, output, batch, **kw: path.write_text(f"batch_size: {batch}\n"))
+    monkeypatch.setattr(train_worker.telemetry, "Monitor", Monitor)
+    (tmp_path / "out").mkdir(exist_ok=True)
+
+    def calibrate():
+        return train_worker._calibrate(tmp_path, tmp_path / "out" / "o", tmp_path / "cal.json", "L40S", 45.0, "off")
+
+    return calibrate, seen, pytest
+
+
+def test_slm_adversarial_loss_gets_two_clips_at_every_batch_size(tmp_path):
+    base = {"data_params": {}, "loss_params": {}, "slmadv_params": {"batch_percentage": 0.5}}
+    for batch, expected in ((2, 1.0), (4, 0.5), (6, 0.5), (8, 0.5)):
+        config = prepare.build_config(base, tmp_path, tmp_path / "out", batch, 6, tmp_path / "p.pth")
+        share = config["slmadv_params"]["batch_percentage"]
+        assert share == expected and batch * share >= 2  # slmadv returns None (skips SLM) with <= 1 clip
+    assert base["slmadv_params"]["batch_percentage"] == 0.5  # the upstream base config is not mutated
+
+
+def test_calibration_stops_on_a_crash_that_is_not_out_of_memory(tmp_path, monkeypatch):
+    crash = (1, {}, "ModuleNotFoundError: No module named 'pandas'\n")
+    calibrate, seen, pytest = _fake_calibration(monkeypatch, tmp_path, {2: crash, 1: crash})
+    with pytest.raises(RuntimeError, match="not out of memory[\\s\\S]*pandas"):
+        calibrate()
+    assert seen == [2]  # the same import error at every batch size: no further probes
+
+
+def test_calibration_backs_off_on_oom_and_keeps_smaller_batch_on_timeout(tmp_path, monkeypatch):
+    ok = lambda s: (0, {"examples_per_s": s, "step_s": 1.0, "peak_vram_gb": 10.0}, "")
+    outcomes = {2: ok(2.0), 4: ok(3.5), 6: (-15, {}, "TRAIN_PROGRESS\nTIMEOUT\n"), 8: ok(9.9)}
+    calibrate, seen, _ = _fake_calibration(monkeypatch, tmp_path, outcomes)
+    assert calibrate()["setting"] == 4 and seen == [2, 4, 6]
+
+    (tmp_path / "cal.json").unlink()
+    oom = (1, {}, "torch.OutOfMemoryError: CUDA out of memory.\n")
+    calibrate, seen, pytest = _fake_calibration(monkeypatch, tmp_path, {2: oom})
+    with pytest.raises(RuntimeError, match="cannot train below batch 2"):
+        calibrate()
+    assert seen == [2]
 
 
 def test_training_probes_small_batches_and_estimates_wall_time(tmp_path):
-    assert train_worker.CANDIDATES[0] == 2 and max(train_worker.CANDIDATES) <= 8
+    assert min(train_worker.CANDIDATES) == 2 and max(train_worker.CANDIDATES) <= 8
     (tmp_path / "train_list.txt").write_text("".join(f"raw/{i}.wav|p|0\n" for i in range(100)))
     est = train_worker.training_estimate(tmp_path, batch=4, step_s=3.6, epochs=6)
     assert est["steps_per_epoch"] == 25
