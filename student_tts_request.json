@@ -1,6 +1,7 @@
 {
   "run": true,
   "gpu": "l40s",
-  "note": "Training run after Docker-verified fixes (bb27202, 438cc82); reuse dataset + lists",
-  "attempt": 9
+  "note": "Per-phase batch sizes (plain vs SLM epochs); stops the batch-2 app, resumes from its checkpoints",
+  "attempt": 10,
+  "handoff_from_app": "ap-yHeAgr1sKD5X6IK1sHe1za"
 }
