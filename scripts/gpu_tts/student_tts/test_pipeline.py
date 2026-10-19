@@ -258,15 +258,16 @@ def test_training_oom_falls_back_one_supported_step():
 
 
 def _fake_calibration(monkeypatch, tmp_path, outcomes):
-    """Run train_worker._calibrate with _run replaced: outcomes maps batch -> (code, metrics, logs)."""
+    """Run train_worker._calibrate with _run replaced: outcomes maps (phase, batch) -> (code, metrics, logs)."""
     import pytest
+    import yaml
 
     seen = []
 
     def fake_run(config, steps, timeout_s, amp, workers=8, prefetch=4):
-        batch = int(__import__("yaml").safe_load(config.read_text())["batch_size"])
-        seen.append(batch)
-        return outcomes[batch]
+        cfg = yaml.safe_load(config.read_text())
+        seen.append((cfg["probe"], int(cfg["batch_size"])))
+        return outcomes[seen[-1]]
 
     class Monitor:
         def __init__(self, *a, **k):
@@ -283,7 +284,8 @@ def _fake_calibration(monkeypatch, tmp_path, outcomes):
 
     monkeypatch.setattr(train_worker, "_run", fake_run)
     monkeypatch.setattr(train_worker.prepare, "write_config",
-                        lambda path, data, output, batch, **kw: path.write_text(f"batch_size: {batch}\n"))
+                        lambda path, data, output, batch, **kw: path.write_text(
+                            f"batch_size: {batch}\nprobe: {kw['probe']}\n"))
     monkeypatch.setattr(train_worker.telemetry, "Monitor", Monitor)
     (tmp_path / "out").mkdir(exist_ok=True)
 
@@ -302,35 +304,188 @@ def test_slm_adversarial_loss_gets_two_clips_at_every_batch_size(tmp_path):
     assert base["slmadv_params"]["batch_percentage"] == 0.5  # the upstream base config is not mutated
 
 
+def _ok(examples_per_s, step_s=1.0, vram=10.0):
+    return 0, {"examples_per_s": examples_per_s, "step_s": step_s, "peak_vram_gb": vram}, ""
+
+
+OOM = (1, {}, "torch.OutOfMemoryError: CUDA out of memory.\n")
+TIMEOUT = (-15, {}, "TRAIN_PROGRESS\nTIMEOUT\n")
+
+
 def test_calibration_stops_on_a_crash_that_is_not_out_of_memory(tmp_path, monkeypatch):
     crash = (1, {}, "ModuleNotFoundError: No module named 'pandas'\n")
-    calibrate, seen, pytest = _fake_calibration(monkeypatch, tmp_path, {2: crash, 1: crash})
+    calibrate, seen, pytest = _fake_calibration(monkeypatch, tmp_path, {("heavy", 2): crash})
     with pytest.raises(RuntimeError, match="not out of memory[\\s\\S]*pandas"):
         calibrate()
-    assert seen == [2]  # the same import error at every batch size: no further probes
+    assert seen == [("heavy", 2)]  # the same import error at every batch size: no further probes
 
 
-def test_calibration_backs_off_on_oom_and_keeps_smaller_batch_on_timeout(tmp_path, monkeypatch):
-    ok = lambda s: (0, {"examples_per_s": s, "step_s": 1.0, "peak_vram_gb": 10.0}, "")
-    outcomes = {2: ok(2.0), 4: ok(3.5), 6: (-15, {}, "TRAIN_PROGRESS\nTIMEOUT\n"), 8: ok(9.9)}
+def test_calibration_picks_a_batch_per_phase_with_backoff_and_timeouts(tmp_path, monkeypatch):
+    outcomes = {("heavy", 2): _ok(2.0), ("heavy", 4): _ok(3.5), ("heavy", 6): TIMEOUT,
+                ("plain", 6): _ok(6.0), ("plain", 8): _ok(7.5), ("plain", 12): OOM}
     calibrate, seen, _ = _fake_calibration(monkeypatch, tmp_path, outcomes)
-    assert calibrate()["setting"] == 4 and seen == [2, 4, 6]
+    choices = calibrate()
+    assert choices["heavy"]["setting"] == 4 and choices["plain"]["setting"] == 8
+    # plain only probes above the heavy batch: plain's losses are a subset of heavy's
+    assert seen == [("heavy", 2), ("heavy", 4), ("heavy", 6), ("plain", 6), ("plain", 8), ("plain", 12)]
+
+    seen.clear()
+    assert calibrate() == choices and seen == []  # a retried container reuses both saved choices
 
     (tmp_path / "cal.json").unlink()
-    oom = (1, {}, "torch.OutOfMemoryError: CUDA out of memory.\n")
-    calibrate, seen, pytest = _fake_calibration(monkeypatch, tmp_path, {2: oom})
+    calibrate, seen, pytest = _fake_calibration(monkeypatch, tmp_path, {("heavy", 2): OOM})
     with pytest.raises(RuntimeError, match="cannot train below batch 2"):
         calibrate()
-    assert seen == [2]
+    assert seen == [("heavy", 2)]
 
 
-def test_training_probes_small_batches_and_estimates_wall_time(tmp_path):
-    assert min(train_worker.CANDIDATES) == 2 and max(train_worker.CANDIDATES) <= 8
-    (tmp_path / "train_list.txt").write_text("".join(f"raw/{i}.wav|p|0\n" for i in range(100)))
-    est = train_worker.training_estimate(tmp_path, batch=4, step_s=3.6, epochs=6)
-    assert est["steps_per_epoch"] == 25
-    # 4 plain epochs at 0.025 h plus 2 joint epochs at 1.5x
-    assert est["projected_hours"] == round(0.025 * 4 + 0.025 * 1.5 * 2, 2)
+def test_calibration_ignores_the_v1_single_batch_choice(tmp_path, monkeypatch):
+    import json
+
+    v1 = {"chosen": {"setting": 2, "stable": True, "throughput": 1.5, "vram_used_gb": 27, "vram_total_gb": 45,
+                     "utilization_pct": 60, "step_s": 1.35, "error": ""}, "trace": [], "amp": "off"}
+    (tmp_path / "cal.json").write_text(json.dumps({"L40S": {"styletts2": v1}}))
+    outcomes = {("heavy", 2): _ok(2.0), ("heavy", 4): OOM, ("plain", 4): _ok(3.0), ("plain", 6): _ok(4.0),
+                ("plain", 8): _ok(4.1, vram=43.0)}
+    calibrate, seen, _ = _fake_calibration(monkeypatch, tmp_path, outcomes)
+    choices = calibrate()
+    assert [b for _, b in seen] == [2, 4, 4, 6, 8]  # probed afresh despite the saved v1 batch 2
+    assert choices["heavy"]["setting"] == 2 and choices["plain"]["setting"] == 6  # 8 lacks 7.5% headroom
+    saved = json.loads((tmp_path / "cal.json").read_text())["L40S"]
+    assert saved["styletts2"] == v1 and {"styletts2-v2-heavy", "styletts2-v2-plain"} <= set(saved)
+
+
+def test_plain_calibration_falls_back_to_the_heavy_batch(tmp_path, monkeypatch):
+    calibrate, seen, _ = _fake_calibration(monkeypatch, tmp_path, {
+        ("heavy", 2): _ok(2.0, step_s=2.5), ("heavy", 4): OOM, ("plain", 4): TIMEOUT})
+    choices = calibrate()
+    assert choices["plain"]["setting"] == 2 and choices["plain"]["step_s"] == 2.5
+    assert seen[-1] == ("plain", 4)
+
+    (tmp_path / "cal.json").unlink()
+    calibrate, seen, _ = _fake_calibration(monkeypatch, tmp_path, {
+        ("heavy", 2): _ok(2.0), ("heavy", 4): OOM, ("plain", 4): OOM})
+    assert calibrate()["plain"]["setting"] == 2
+
+
+def test_phase_configs_keep_the_full_schedule(tmp_path):
+    base = {"data_params": {}, "loss_params": {}, "slmadv_params": {"batch_percentage": 0.5}}
+    assert prepare.phase_epochs(6) == (1, 4)
+    first = prepare.build_config(base, tmp_path, tmp_path / "out", 8, 6, tmp_path / "p.pth", stop_epoch=4)
+    assert first["epochs"] == 4 and first["batch_size"] == 8
+    assert (first["loss_params"]["diff_epoch"], first["loss_params"]["joint_epoch"]) == (1, 4)
+    plain = prepare.build_config(base, tmp_path, tmp_path / "out", 8, 1, tmp_path / "p.pth", probe="plain")
+    heavy = prepare.build_config(base, tmp_path, tmp_path / "out", 2, 1, tmp_path / "p.pth", probe="heavy")
+    assert plain["loss_params"] == {"diff_epoch": 0, "joint_epoch": 1}  # diffusion on, SLM never in epoch 0
+    assert heavy["loss_params"] == {"diff_epoch": 0, "joint_epoch": 0}
+
+
+def test_training_estimate_reports_each_phase(tmp_path):
+    (tmp_path / "train_list.txt").write_text("".join(f"raw/{i}.wav|p|0\n" for i in range(101)))
+    choices = {"plain": {"setting": 8, "step_s": 1.8}, "heavy": {"setting": 4, "step_s": 3.6}}
+    est = train_worker.training_estimate(tmp_path, choices, epochs=6)
+    plain, heavy = est["phases"]["plain"], est["phases"]["heavy"]
+    assert (plain["epochs"], plain["steps_per_epoch"], heavy["epochs"], heavy["steps_per_epoch"]) == \
+        ([0, 4], 12, [4, 6], 25)  # partial last batches are dropped
+    assert plain["hours"] == round(4 * 12 * 1.8 / 3600, 2) and heavy["hours"] == round(2 * 25 * 3.6 / 3600, 2)
+    assert est["projected_hours"] == round((4 * 12 * 1.8 + 2 * 25 * 3.6) / 3600, 2)
+    resumed = train_worker.training_estimate(tmp_path, choices, epochs=6, start_epoch=1)
+    assert resumed["phases"]["plain"]["remaining_epochs"] == 3 and resumed["phases"]["heavy"]["remaining_epochs"] == 2
+
+
+def _fake_training(monkeypatch, tmp_path, oom_at=()):
+    """Real prepare.write_config on a minimal base; _run writes one checkpoint per epoch it would train."""
+    import yaml
+
+    base = tmp_path / "base.yml"
+    base.write_text(yaml.safe_dump({"data_params": {}, "loss_params": {}, "slmadv_params": {"batch_percentage": 0.5}}))
+    monkeypatch.setattr(prepare, "BASE_CONFIG", base)
+    runs = []
+
+    def fake_run(config, steps, timeout_s, amp, workers=8, prefetch=4):
+        cfg = yaml.safe_load(config.read_text())
+        out = Path(cfg["log_dir"])
+        start = train_worker.next_epoch(out)
+        runs.append({"batch": cfg["batch_size"], "start": start, "epochs": cfg["epochs"],
+                     "resume": not cfg["load_only_params"], "joint": cfg["loss_params"]["joint_epoch"],
+                     "workers": workers})
+        if (cfg["batch_size"], start) in oom_at:
+            return 1, {}, "torch.OutOfMemoryError: CUDA out of memory.\n"
+        for epoch in range(start, cfg["epochs"]):
+            (out / f"epoch_2nd_{epoch:05d}.pth").write_bytes(b"")
+        return 0, {}, ""
+
+    class Monitor:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def summary(self):
+            return {}
+
+    monkeypatch.setattr(train_worker, "_run", fake_run)
+    monkeypatch.setattr(train_worker.telemetry, "Monitor", Monitor)
+    out = tmp_path / "out"
+    out.mkdir()
+
+    def train(**kw):
+        choices = {"plain": {"setting": 8, "utilization_pct": 90}, "heavy": {"setting": 4, "utilization_pct": 90}}
+        return train_worker.train_phases(tmp_path, out, tmp_path / "config_ft.yml", tmp_path / "p.pth",
+                                         choices, "off", epochs=6, **kw)
+
+    return train, runs, out
+
+
+def test_training_runs_plain_epochs_then_resumes_slm_epochs_at_the_heavy_batch(tmp_path, monkeypatch):
+    train, runs, out = _fake_training(monkeypatch, tmp_path)
+    report = train()
+    assert runs == [
+        {"batch": 8, "start": 0, "epochs": 4, "resume": False, "joint": 4, "workers": 8},
+        {"batch": 4, "start": 4, "epochs": 6, "resume": True, "joint": 4, "workers": 8},
+    ]
+    assert {p: r["batch"] for p, r in report.items()} == {"plain": 8, "heavy": 4}
+    assert train_worker.next_epoch(out) == 6
+    runs.clear()
+    assert train() == {} and runs == []  # a retry after both phases trains nothing
+
+
+def test_training_resumes_mid_phase_and_backs_off_on_oom_per_phase(tmp_path, monkeypatch):
+    train, runs, out = _fake_training(monkeypatch, tmp_path, oom_at={(8, 1), (4, 4)})
+    (out / "epoch_2nd_00000.pth").write_bytes(b"")  # epoch 0 from an earlier run (e.g. the batch-2 app)
+    report = train()
+    assert [(r["batch"], r["start"], r["epochs"], r["resume"]) for r in runs] == [
+        (8, 1, 4, True), (6, 1, 4, True), (4, 4, 6, True), (2, 4, 6, True)]
+    assert runs[1]["workers"] == 8 and {p: r["batch"] for p, r in report.items()} == {"plain": 6, "heavy": 2}
+
+
+def test_training_fails_fast_on_a_crash_that_is_not_out_of_memory(tmp_path, monkeypatch):
+    import pytest
+
+    train, runs, _ = _fake_training(monkeypatch, tmp_path)
+    monkeypatch.setattr(train_worker, "_run", lambda *a, **k: runs.append(1) or (1, {}, "KeyError: 'x'\n"))
+    with pytest.raises(RuntimeError, match="plain phase exited 1"):
+        train()
+    assert runs == [1]
+
+
+def test_pinned_styletts2_lr_is_constant_so_a_batch_change_cannot_reschedule_it():
+    import pytest
+
+    upstream = Path("/opt/styletts2")
+    if not (upstream / "train_finetune.py").exists():
+        pytest.skip("StyleTTS2 checkout only exists in the Docker preflight image")
+    train = (upstream / "train_finetune.py").read_text()
+    optim = (upstream / "optimizers.py").read_text()
+    # Phase 2 resumes AdamW state with a new steps_per_epoch. That is only safe while the OneCycleLR
+    # schedulers are flat (div_factor = final_div_factor = 1), never stepped, and not checkpointed.
+    assert "div_factor=1," in optim and "final_div_factor=1)" in optim
+    assert ".scheduler(" not in train and "scheduler.step" not in train
+    assert "state_dicts = [(key, self.optimizers[key].state_dict())" in optim
 
 
 def test_cuda_patch_applies_to_pinned_styletts2(tmp_path):

@@ -42,18 +42,26 @@ def prepare_lists(data: Path, min_s: float = 1.0, max_s: float = 16.0) -> dict:
             "hours": round(sum(r["duration_s"] for r in rows) / 3600, 2)}
 
 
+def phase_epochs(epochs: int) -> tuple[int, int]:
+    """(diff_epoch, joint_epoch). Upstream (1 h of data) uses 50 epochs with diffusion from 10 and joint SLM
+    training from 30; the same 20%/60% proportions over 6 epochs give 1 and 4."""
+    return round(epochs * 0.2), round(epochs * 0.6)
+
+
 def build_config(base: dict, data: Path, output: Path, batch_size: int, epochs: int, pretrained: Path,
-                 heavy: bool = False) -> dict:
+                 probe: str | None = None, stop_epoch: int | None = None) -> dict:
     """Upstream ft config with our data. Resumes from the newest epoch_2nd_*.pth in output when present.
 
-    Upstream (1 h of data) uses 50 epochs with diffusion from 10 and joint SLM training from 30;
-    the same 20%/60% proportions over 15 epochs give 3 and 9. heavy=True starts both at epoch 0
-    so a short calibration probe measures the most memory-hungry training step.
+    epochs is the whole schedule (it places diff_epoch and joint_epoch); stop_epoch ends this process early,
+    so the epochs before joint_epoch can run at a larger batch than the SLM epochs after it.
+    probe="plain" (diffusion on, no SLM) or "heavy" (diffusion + SLM) turns those losses on from step 0
+    so a short calibration probe measures that training phase's most memory-hungry step.
     """
     config = json.loads(json.dumps(base))
     checkpoints = sorted(output.glob("epoch_2nd_*.pth"))
     config.update({
-        "log_dir": str(output), "save_freq": 1, "epochs": epochs, "batch_size": batch_size, "max_len": 400,
+        "log_dir": str(output), "save_freq": 1, "epochs": stop_epoch or epochs, "batch_size": batch_size,
+        "max_len": 400,
         "pretrained_model": str(checkpoints[-1] if checkpoints else pretrained),
         "second_stage_load_pretrained": True,
         "load_only_params": not checkpoints,
@@ -61,8 +69,8 @@ def build_config(base: dict, data: Path, output: Path, batch_size: int, epochs: 
                         "val_data": str(data / "val_list.txt"), "OOD_data": str(data / "OOD_texts.txt"),
                         "root_path": str(data)},
     })
-    config["loss_params"]["diff_epoch"] = 0 if heavy else round(epochs * 0.2)
-    config["loss_params"]["joint_epoch"] = 0 if heavy else round(epochs * 0.6)
+    diff, joint = {"plain": (0, epochs), "heavy": (0, 0)}.get(probe) or phase_epochs(epochs)
+    config["loss_params"]["diff_epoch"], config["loss_params"]["joint_epoch"] = diff, joint
     # slmadv keeps batch_percentage x batch clips and returns None (SLM loss silently skipped) with one or
     # fewer, so the upstream 0.5 would disable SLM adversarial training entirely at batch 2.
     slm = config["slmadv_params"]
@@ -72,11 +80,11 @@ def build_config(base: dict, data: Path, output: Path, batch_size: int, epochs: 
 
 def write_config(path: Path, data: Path, output: Path, batch_size: int, epochs: int = 15,
                  pretrained: Path = Path("/workspace/cache/styletts2/Models/LibriTTS/epochs_2nd_00020.pth"),
-                 heavy: bool = False) -> None:
+                 probe: str | None = None, stop_epoch: int | None = None) -> None:
     """path must not be inside output: train_finetune.py copies the config into log_dir under its basename."""
     if path.resolve().parent == output.resolve():
         raise ValueError("config path must be outside log_dir")
     output.mkdir(parents=True, exist_ok=True)
     config = build_config(yaml.safe_load(BASE_CONFIG.read_text()), data, output, batch_size, epochs,
-                          pretrained, heavy)
+                          pretrained, probe, stop_epoch)
     path.write_text(yaml.safe_dump(config, sort_keys=False))

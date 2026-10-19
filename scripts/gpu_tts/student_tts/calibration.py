@@ -47,7 +47,15 @@ def choose_training(measurements: Iterable[Measurement], min_headroom_pct: float
 
 # StyleTTS2's own default is 8 split across four GPUs, about 2 per GPU. Batch 1 is not an option: its
 # torch.stack(...).squeeze() drops the batch dimension and the diffusion/SLM losses then fail on shapes.
-TRAINING_BATCHES = (2, 4, 6, 8)
+TRAINING_BATCHES = (2, 4, 6, 8, 12)
+# Each training phase gets its own batch. "plain" covers epochs [0, joint_epoch): diffusion from diff_epoch but
+# no SLM adversarial loss, so it fits far larger batches. "heavy" covers [joint_epoch, epochs): diffusion + SLM.
+PHASE_BATCHES = {"heavy": (2, 4, 6), "plain": (4, 6, 8, 12)}
+
+
+def phase_kind(phase: str) -> str:
+    """Calibration key per phase. The v1 key "styletts2" held one heavy-phase batch for the whole run."""
+    return f"styletts2-v2-{phase}"
 
 
 def next_smaller_batch(failed: int, candidates: tuple[int, ...] = TRAINING_BATCHES) -> int:
