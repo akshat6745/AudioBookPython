@@ -121,19 +121,29 @@ def _higgs_calibration(tts, rows: list[dict], raw_dir: Path, state: Path, gpu_na
     return chosen.setting, completed
 
 
+def select(work: Path) -> dict:
+    """CPU-only: build or reload the balanced Higgs request manifest on the Volume."""
+    work = work.resolve()
+    manifest_path = work / "request_manifest.jsonl"
+    if manifest_path.exists():
+        selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
+        return {"manifest": dataset.summary(selected), "cached": True}
+    selected = dataset.select_balanced(dataset.candidates(_source_rows()))
+    planned = dataset.write_manifest(manifest_path, selected)
+    if not 10 <= planned["total_estimated_hours"] <= 20:
+        raise RuntimeError(f"selector produced {planned['total_estimated_hours']} h, outside the 10-20 h target")
+    if planned["neutral_audio_pct"] > 50:
+        raise RuntimeError(f"selector produced {planned['neutral_audio_pct']}% neutral audio")
+    return {"manifest": planned, "cached": False}
+
+
 def generate(work: Path, cache: Path) -> dict:
     work, cache = work.resolve(), cache.resolve()
     raw_dir = work / "raw"
     manifest_path = work / "request_manifest.jsonl"
-    if manifest_path.exists():
-        selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
-    else:
-        selected = dataset.select_balanced(dataset.candidates(_source_rows()))
-        planned = dataset.write_manifest(manifest_path, selected)
-        if not 10 <= planned["total_estimated_hours"] <= 20:
-            raise RuntimeError(f"selector produced {planned['total_estimated_hours']} h, outside the 10-20 h target")
-        if planned["neutral_audio_pct"] > 50:
-            raise RuntimeError(f"selector produced {planned['neutral_audio_pct']}% neutral audio")
+    if not manifest_path.exists():
+        raise RuntimeError("request_manifest.jsonl missing; run select_dataset first")
+    selected = [json.loads(line) for line in manifest_path.read_text().splitlines() if line.strip()]
     cr.start_higgs(cache)
     try:
         import synth

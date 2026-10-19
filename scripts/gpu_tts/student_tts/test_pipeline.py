@@ -3,11 +3,20 @@ from pathlib import Path
 import calibration
 import dataset
 import higgs_format as hf
+import pipeline_worker
 import prepare
+
+MODAL_STAGE_ENTRYPOINTS = ("select", "generate", "qa_and_publish")
 
 
 def m(setting, stable, throughput, used, total=48):
     return calibration.Measurement(setting, stable, throughput, used, total, 90)
+
+
+def test_pipeline_worker_exports_modal_stage_entrypoints():
+    for name in MODAL_STAGE_ENTRYPOINTS:
+        fn = getattr(pipeline_worker, name, None)
+        assert callable(fn), f"pipeline_worker missing Modal stage entrypoint {name!r}"
 
 
 def test_higgs_keeps_64_when_higher_width_does_not_improve_passed_audio():

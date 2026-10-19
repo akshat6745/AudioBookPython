@@ -2,5 +2,5 @@
   "run": true,
   "gpu": "l40s",
   "note": "Approved student-TTS pipeline: Higgs L40S dataset + Whisper QA + StyleTTS2 L40S training",
-  "attempt": 2
+  "attempt": 3
 }
