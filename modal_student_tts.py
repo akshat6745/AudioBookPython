@@ -51,6 +51,9 @@ train_image = (
         "python -m pip install munch pydub librosa nltk matplotlib einops einops-exts tqdm pandas "
         "tensorboard git+https://github.com/resemble-ai/monotonic_align.git",
     )
+    # StyleTTS2's ASR/JDC/PLBERT and LibriTTS checkpoints are pickled; PyTorch >= 2.6 refuses them by default.
+    # They come from the upstream repo and its Hugging Face release.
+    .env({"TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1"})
     .add_local_dir("scripts/gpu_tts", remote_path=ROOT, ignore=IGNORE)
 )
 
@@ -175,7 +178,10 @@ def orchestrate(gpu: str) -> dict:
     publishing = publish_dataset.spawn()
     print("STAGE start publish (in parallel with training)", flush=True)
     result["training"] = run("training", train_l40s if gpu == "l40s" else train_l4)
-    result["publish"] = publishing.get()
+    try:  # the R2 copy is a backup of what is already on the Volume; it must not fail a finished training run
+        result["publish"] = publishing.get()
+    except Exception as exc:  # noqa: BLE001
+        result["publish"] = {"error": f"{type(exc).__name__}: {exc}"[:500]}
     print(f"STAGE done publish: {json.dumps(result['publish'])}", flush=True)
     return result
 

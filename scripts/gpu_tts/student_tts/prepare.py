@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from pathlib import Path
 
 import yaml
 
 SPEAKERS = {"narrator": 0, "dialogue": 1}
-BASE_CONFIG = Path("/opt/styletts2/Configs/config_ft.yml")
+BASE_CONFIG = Path(os.environ.get("STYLETTS_ROOT", "/opt/styletts2")) / "Configs" / "config_ft.yml"
 
 
 def format_line(data: Path, row: dict, phonemes: str) -> str:
@@ -62,6 +63,10 @@ def build_config(base: dict, data: Path, output: Path, batch_size: int, epochs: 
     })
     config["loss_params"]["diff_epoch"] = 0 if heavy else round(epochs * 0.2)
     config["loss_params"]["joint_epoch"] = 0 if heavy else round(epochs * 0.6)
+    # slmadv keeps batch_percentage x batch clips and returns None (SLM loss silently skipped) with one or
+    # fewer, so the upstream 0.5 would disable SLM adversarial training entirely at batch 2.
+    slm = config["slmadv_params"]
+    slm["batch_percentage"] = min(1.0, max(float(slm["batch_percentage"]), 2 / batch_size))
     return config
 
 

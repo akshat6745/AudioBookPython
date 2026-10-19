@@ -13,7 +13,6 @@ import soundfile as sf
 import torch
 import torchaudio
 import yaml
-from nltk.tokenize import word_tokenize
 from phonemizer.backend import EspeakBackend
 
 TEXTS = [
@@ -34,20 +33,21 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--limit", type=int, default=len(TEXTS), help="sentences per voice (the CPU smoke uses 1)")
     args = parser.parse_args()
     repo, output = args.repo.resolve(), args.output.resolve()
     os.chdir(repo)
     sys.path.insert(0, str(repo))
-    from models import build_model
-    from utils import load_ASR_models, load_F0_models, recursive_munch
+    from models import build_model, load_ASR_models, load_F0_models
+    from utils import recursive_munch
     from text_utils import TextCleaner
     from Utils.PLBERT.util import load_plbert
     from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
 
     config = yaml.safe_load(args.config.read_text())
-    device = "cuda" if torch.cuda.is_available() else (
+    device = os.environ.get("SAMPLE_DEVICE") or ("cuda" if torch.cuda.is_available() else (
         "mps" if torch.backends.mps.is_available() else "cpu"
-    )
+    ))
     model = build_model(
         recursive_munch(config["model_params"]),
         load_ASR_models(config["ASR_path"], config["ASR_config"]),
@@ -88,7 +88,10 @@ def main() -> None:
 
     def infer(text: str, ref_s):
         phones = phonemizer.phonemize([text])[0]
-        tokens = cleaner(" ".join(word_tokenize(phones, preserve_line=True)))
+        # Upstream splits punctuation off words with nltk.word_tokenize, which needs the punkt_tab download.
+        for mark in ',.!?;:"':
+            phones = phones.replace(mark, f" {mark} ")
+        tokens = cleaner(" ".join(phones.split()))
         tokens.insert(0, 0)
         tokens = torch.LongTensor(tokens).to(device).unsqueeze(0)
         with torch.no_grad():
@@ -122,10 +125,10 @@ def main() -> None:
     output.mkdir(parents=True, exist_ok=True)
     for voice in ("narrator", "dialogue"):
         ref_s = style(refs[voice])
-        for idx, text in enumerate(TEXTS):
+        for idx, text in enumerate(TEXTS[:args.limit]):
             sf.write(output / f"{voice}-{idx + 1:02d}.wav", infer(text, ref_s), 24000, subtype="PCM_16")
     (output / "samples.json").write_text(
-        __import__("json").dumps({"texts": TEXTS, "checkpoint": checkpoint.name}, indent=2)
+        __import__("json").dumps({"texts": TEXTS[:args.limit], "checkpoint": checkpoint.name}, indent=2)
     )
 
 

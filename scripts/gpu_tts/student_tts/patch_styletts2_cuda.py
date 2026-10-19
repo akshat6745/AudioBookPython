@@ -37,6 +37,7 @@ def patch(root: Path = Path("/opt/styletts2")) -> None:
             "    print('CUDA_SETTINGS ' + json.dumps({'amp': amp, 'tf32': True, 'cudnn_benchmark': True, "
             "'gpu': torch.cuda.get_device_name(0)}), flush=True)\n"
             "    max_steps = int(os.environ.get('MAX_STEPS', '0'))\n"
+            "    slm_steps = 0  # steps where slmadv returned a loss; upstream skips it silently otherwise\n"
             "    warm_t = None\n"
             "    train_workers = int(os.environ.get('TRAIN_WORKERS', '8'))\n",
         )
@@ -56,12 +57,20 @@ def patch(root: Path = Path("/opt/styletts2")) -> None:
             "                steps = iters - 5\n"
             "                print('TRAIN_METRICS ' + json.dumps({'steps': steps, 'wall_s': elapsed, "
             "'examples_per_s': steps * batch_size / elapsed, 'step_s': elapsed / steps, "
-            "'peak_vram_gb': torch.cuda.max_memory_reserved() / 2**30}), flush=True)\n"
+            "'peak_vram_gb': torch.cuda.max_memory_reserved() / 2**30, 'slm_steps': slm_steps}), flush=True)\n"
             "                return\n"
             "            if iters % 100 == 0:\n"
             "                print('TRAIN_PROGRESS ' + json.dumps({'epoch': epoch + 1, 'iters': iters, "
-            "'peak_vram_gb': round(torch.cuda.max_memory_reserved() / 2**30, 2)}), flush=True)\n",
+            "'slm_steps': slm_steps, 'peak_vram_gb': round(torch.cuda.max_memory_reserved() / 2**30, 2)}), "
+            "flush=True)\n",
         )
+        text = replace_once(text, "                if slm_out is not None:\n",
+                            "                if slm_out is not None:\n"
+                            "                    slm_steps += 1\n")
+        text = replace_once(text, "        print('Epochs:', epoch + 1)\n",
+                            "        print('Epochs:', epoch + 1)\n"
+                            "        print('SLM_STEPS ' + json.dumps({'epoch': epoch + 1, 'slm_steps': slm_steps, "
+                            "'iters': iters}), flush=True)\n")
         text = replace_once(
             text,
             "        model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],\n"

@@ -15,7 +15,7 @@ import prepare
 import telemetry
 
 STYLE_ROOT = Path("/opt/styletts2")
-CANDIDATES = calibration.TRAINING_BATCHES[1:]  # probe upward from 2; 1 is only an OOM fallback
+CANDIDATES = calibration.TRAINING_BATCHES  # probe upward from 2, the smallest batch StyleTTS2 can train
 CALIBRATION_BUDGET_S = 15 * 60
 CALIBRATION_STEPS = 25
 # ~11 h of audio x 6 epochs ~= 66 audio-hours seen, more than upstream's 1 h x 50 epochs. 15 epochs projected
@@ -88,6 +88,14 @@ def _is_oom(logs: str) -> bool:
     return "out of memory" in logs.lower() or "outofmemoryerror" in logs.lower()
 
 
+def _raise_unless_oom(code: int, stable: bool, oom: bool, logs: str, batch: int) -> None:
+    """Only OOM means "try a smaller batch". Any other probe failure (missing package, unloadable checkpoint)
+    fails the same way at every batch size, so stop and show its error instead of probing on."""
+    if not stable and not oom:
+        tail = "\n".join(logs.splitlines()[-30:])
+        raise RuntimeError(f"calibration probe at batch {batch} failed (exit {code}), not out of memory:\n{tail}")
+
+
 def _calibrate(data: Path, output: Path, state: Path, gpu_name: str, total_vram: float,
                default_amp: str) -> dict:
     saved = calibration.load_choice(state, gpu_name, "styletts2")
@@ -121,21 +129,17 @@ def _calibrate(data: Path, output: Path, state: Path, gpu_name: str, total_vram:
             step_s=round(metrics.get("step_s", 0), 3), error="oom" if oom else ("" if stable else f"exit-{code}"),
         )
         trace.append(m)
-        log("CALIBRATION " + json.dumps({**m.__dict__, "amp": amp, "headroom_pct": round(m.headroom_pct, 1)}))
+        log("CALIBRATION " + json.dumps({**m.__dict__, "amp": amp, "headroom_pct": round(m.headroom_pct, 1),
+                                         "slm_steps": metrics.get("slm_steps")}))
+        if logs.rstrip().endswith("TIMEOUT") and any(t.stable for t in trace):
+            log(f"batch {batch} probe ran past its time limit; keeping the smaller batches")
+            break
+        _raise_unless_oom(code, stable, oom, logs, batch)
         if not stable or m.headroom_pct < 7.5:
             break  # larger batches only use more memory
     if not any(m.stable for m in trace):
-        log("batch 2 did not fit; probing batch 1")
-        prepare.write_config(config, data, output / "calibration-output", 1, epochs=1, heavy=True)
-        with telemetry.Monitor(lambda: 1, interval_s=2) as monitor:
-            code, metrics, logs = _run(config, CALIBRATION_STEPS, 420, amp)
-        stable = code == 0 and bool(metrics) and not _is_oom(logs)
-        trace.append(calibration.Measurement(
-            setting=1, stable=stable, throughput=round(metrics.get("examples_per_s", 0), 3),
-            vram_used_gb=round(metrics.get("peak_vram_gb", total_vram), 2), vram_total_gb=round(total_vram, 2),
-            utilization_pct=monitor.summary().get("median_utilization_pct", 0),
-            step_s=round(metrics.get("step_s", 0), 3), error="" if stable else f"exit-{code}",
-        ))
+        raise RuntimeError(f"batch {CANDIDATES[0]} ran out of memory at max_len 400 with the SLM losses on; "
+                           "StyleTTS2 cannot train below batch 2, so lower max_len instead")
     chosen = calibration.choose_training(trace)
     calibration.save_choice(state, gpu_name, "styletts2", chosen, trace, extra={"amp": amp})
     log(f"CALIBRATION_CHOICE batch={chosen.setting} amp={amp} examples/s={chosen.throughput} "
