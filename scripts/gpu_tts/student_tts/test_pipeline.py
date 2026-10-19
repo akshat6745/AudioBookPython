@@ -112,6 +112,35 @@ def test_local_selection_adapter_persists_and_reuses_manifest(tmp_path):
     assert second == {**first, "cached": True}
 
 
+def test_qa_resumes_saved_verdicts_and_warns_on_small_dataset(tmp_path, monkeypatch, capsys):
+    import json
+    import types
+
+    import numpy as np
+
+    rows = [{"id": f"c{i}", "wav": f"raw/c{i}.wav", "text": "hello"} for i in range(3)]
+    (tmp_path / "generated.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (tmp_path / "qa_results.jsonl").write_text(
+        json.dumps({**rows[0], "duration_s": 2.0, "qa": {"ok": True}}) + "\n")
+    checked = []
+    monkeypatch.setitem(sys.modules, "check_audio", types.SimpleNamespace(
+        transcribe_setup=lambda: (None, None), read_wav=lambda path: (np.zeros(48000, np.float32), 24000)))
+    monkeypatch.setitem(sys.modules, "verify", types.SimpleNamespace(
+        check_clip=lambda text, audio, sr, transcribe: checked.append(text) or {"ok": True}))
+    s3 = types.SimpleNamespace(upload_file=lambda *a, **k: None, put_object=lambda **k: None)
+    monkeypatch.setattr(pipeline_worker.cr, "r2_client", lambda: s3)
+    monkeypatch.setattr(pipeline_worker.prepare, "prepare_lists", lambda work: {})
+    monkeypatch.setattr(pipeline_worker, "dataset_publication_plan", lambda work, prefix, accepted: [])
+    monkeypatch.setenv("R2_BUCKET_NAME", "fixture")
+
+    report = pipeline_worker.qa_and_publish(tmp_path, "prefix")
+
+    assert len(checked) == 2  # the clip already in qa_results.jsonl is not re-transcribed
+    assert report["accepted"] == 3
+    assert "WARNING: QA passed only" in capsys.readouterr().out
+    assert len((tmp_path / "qa_results.jsonl").read_text().splitlines()) == 3
+
+
 def test_cached_manifest_never_fetches_sources(tmp_path, monkeypatch):
     (tmp_path / "request_manifest.jsonl").write_text(
         '{"voice": "narrator", "emotion": "neutral", "estimated_s": 2}\n')

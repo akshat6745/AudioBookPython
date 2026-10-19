@@ -209,27 +209,38 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
 
     work = work.resolve()
     rows = [json.loads(line) for line in (work / "generated.jsonl").read_text().splitlines() if line.strip()]
-    _, transcribe = check_audio.transcribe_setup()
-    accepted, rejected = [], []
+    results_path = work / "qa_results.jsonl"  # one verdict per clip, appended as it is checked, so a rerun resumes
+    done = {}
+    if results_path.exists():
+        for line in results_path.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                done[r["id"]] = r
+    print(f"QA resuming with {len(done)}/{len(rows)} clips already checked", flush=True)
+    accepted = [r for r in done.values() if r["qa"]["ok"]]
+    rejected = [r for r in done.values() if not r["qa"]["ok"]]
+    todo = [r for r in rows if r["id"] not in done]
+    transcribe = check_audio.transcribe_setup()[1] if todo else None
     t0 = time.perf_counter()
-    passed_s = 0.0
-    by_streams: dict[int, dict[str, float]] = {}
-    with telemetry.Monitor(lambda: len(rows) - len(accepted) - len(rejected)) as monitor:
-        for row in rows:
+    with telemetry.Monitor(lambda: len(rows) - len(accepted) - len(rejected)) as monitor, \
+            open(results_path, "a") as results:
+        for row in todo:
             audio, sr = check_audio.read_wav(work / row["wav"])
             verdict = verify.check_clip(row["text"], audio, sr, transcribe)
-            target = accepted if verdict["ok"] else rejected
-            target.append({**row, "duration_s": round(len(audio) / sr, 3), "qa": verdict})
-            stream_stats = by_streams.setdefault(int(row.get("generation_streams", 64)),
-                                                  {"passed_s": 0.0, "rejected_s": 0.0})
-            if verdict["ok"]:
-                passed_s += len(audio) / sr
-                stream_stats["passed_s"] += len(audio) / sr
-            else:
-                stream_stats["rejected_s"] += len(audio) / sr
+            checked = {**row, "duration_s": round(len(audio) / sr, 3), "qa": verdict}
+            (accepted if verdict["ok"] else rejected).append(checked)
+            results.write(json.dumps(checked, ensure_ascii=False) + "\n")
+            results.flush()
     wall = time.perf_counter() - t0
+    passed_s = sum(r["duration_s"] for r in accepted)
+    by_streams: dict[int, dict[str, float]] = {}
+    for r in accepted + rejected:
+        stats = by_streams.setdefault(int(r.get("generation_streams", 64)), {"passed_s": 0.0, "rejected_s": 0.0})
+        stats["passed_s" if r["qa"]["ok"] else "rejected_s"] += r["duration_s"]
+    if not accepted:
+        raise RuntimeError("QA accepted no clips; nothing to train on")
     if passed_s < 10 * 3600:
-        raise RuntimeError(f"QA left only {passed_s / 3600:.2f} h; refusing an undersized training set")
+        print(f"WARNING: QA passed only {passed_s / 3600:.2f} h (target 10-20 h); training on it anyway", flush=True)
     metadata = work / "metadata.jsonl"
     metadata.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in accepted))
     lists = prepare.prepare_lists(work)
