@@ -142,6 +142,32 @@ def test_qa_resumes_saved_verdicts_and_warns_on_small_dataset(tmp_path, monkeypa
     assert len((tmp_path / "qa_results.jsonl").read_text().splitlines()) == 3
 
 
+def test_monitor_needs_real_gpu_output_and_stops_on_tracebacks():
+    import monitor_student_tts as m
+
+    assert m.observe("STAGE start generation") is None  # printed before the GPU container exists
+    assert m.observe('GPU_TELEMETRY {"gpu": "NVIDIA L40S"}') == "gpu"
+    assert m.observe("ModuleNotFoundError: No module named 'yaml'") == "failed"
+
+
+def test_queue_records_the_detached_app_id(tmp_path, monkeypatch):
+    import types
+
+    import queue_student_tts as q
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(q, "APP_ID_FILE", tmp_path / "student_tts_app_id.txt")
+    output = ["spawned Modal function call fc-1\n",
+              "View run at https://modal.com/apps/akshat6745/main/ap-Bbzm6PX7CtwkhvvlWB5zFi\n"]
+    fake = types.SimpleNamespace(stdout=iter(output), wait=lambda: 0, returncode=0)
+    monkeypatch.setattr(q.subprocess, "Popen", lambda *a, **k: fake)
+    request = tmp_path / "request.json"
+    request.write_text('{"run": true, "gpu": "l40s"}')
+    monkeypatch.setattr(sys, "argv", ["queue", str(request)])
+    q.main()
+    assert (tmp_path / "student_tts_app_id.txt").read_text() == "ap-Bbzm6PX7CtwkhvvlWB5zFi"
+
+
 def test_cached_manifest_never_fetches_sources(tmp_path, monkeypatch):
     (tmp_path / "request_manifest.jsonl").write_text(
         '{"voice": "narrator", "emotion": "neutral", "estimated_s": 2}\n')

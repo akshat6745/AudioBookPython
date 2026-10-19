@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
-"""Watch student-tts-eye-v1 until GPU work starts or the job fails."""
+"""Follow the launched student-TTS app until a GPU stage is actually working, or a stage fails."""
 from __future__ import annotations
 
 import select
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-APP = "student-tts-eye-v1"
+APP_ID_FILE = Path("student_tts_app_id.txt")  # written by queue_student_tts.py
 TIMEOUT_S = 45 * 60
+# Lines only printed from inside a running GPU function. "STAGE start <x>" is not enough: the
+# orchestrator prints it before the GPU container exists.
+GPU_MARKERS = ("GPU_TELEMETRY ", "HIGGS_THROUGHPUT ", "healthy at concurrency", "CALIBRATION ", "CUDA_SETTINGS ")
+FAILURE_MARKERS = ("Traceback (most recent call last)", "ModuleNotFoundError", "Runner failed")
 
 
-def observe(line: str, selection: bool, gpu: bool) -> tuple[bool, bool]:
-    selection = selection or "STAGE start selection" in line
-    gpu = gpu or (
-        "STAGE start generation" in line
-        or "healthy at concurrency" in line
-        or "STAGE start training" in line
-        or "CALIBRATION " in line
-        or "CUDA_SETTINGS " in line
-    )
-    return selection, gpu
+def observe(line: str) -> str | None:
+    """'gpu' once a GPU stage is working, 'failed' on a stage error, else None."""
+    if any(m in line for m in FAILURE_MARKERS):
+        return "failed"
+    if any(m in line for m in GPU_MARKERS):
+        return "gpu"
+    return None
 
 
 def main() -> int:
+    app_id = APP_ID_FILE.read_text().strip()
+    print(f"following {app_id}", flush=True)
     deadline = time.monotonic() + TIMEOUT_S
-    selection = gpu = False
     while time.monotonic() < deadline:
         proc = subprocess.Popen(
-            ["modal", "app", "logs", APP, "--follow", "--timestamps"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+            ["modal", "app", "logs", app_id, "--timestamps", "--follow"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         assert proc.stdout is not None
         while time.monotonic() < deadline:
@@ -42,11 +42,14 @@ def main() -> int:
                 if not line:
                     break
                 print(line, end="", flush=True)
-                selection, gpu = observe(line, selection, gpu)
-                if gpu:
+                state = observe(line)
+                if state:
                     proc.terminate()
-                    print("verified student-TTS GPU stage activity")
-                    return 0
+                    if state == "gpu":
+                        print("verified student-TTS GPU stage activity")
+                        return 0
+                    print("student-TTS stage failed; see the traceback above", file=sys.stderr)
+                    return 1
             elif proc.poll() is not None:
                 break
         proc.terminate()
