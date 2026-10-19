@@ -1,6 +1,6 @@
 {
   "run": true,
   "gpu": "l40s",
-  "note": "Training run: reuse dataset + lists; training image now installs pandas",
-  "attempt": 8
+  "note": "Training run after Docker-verified fixes (bb27202, 438cc82); reuse dataset + lists",
+  "attempt": 9
 }
