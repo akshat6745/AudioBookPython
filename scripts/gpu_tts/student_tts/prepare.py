@@ -12,7 +12,7 @@ BASE_CONFIG = Path("/opt/styletts2/Configs/config_ft.yml")
 
 
 def format_line(data: Path, row: dict, phonemes: str) -> str:
-    return f"{row['wav']}|{phonemes.strip()}|{SPEAKERS[row['speaker']]}"
+    return f"{row['wav']}|{phonemes.strip()}|{SPEAKERS[row['voice']]}"
 
 
 def split_lines(lines: list[str], every: int = 50) -> tuple[list[str], list[str]]:

@@ -249,11 +249,16 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
     import verify
 
     work = work.resolve()
-    if all((work / name).exists() for name in ("metadata.jsonl", "train_list.txt", "val_list.txt")):
-        accepted = [json.loads(line) for line in (work / "metadata.jsonl").read_text().splitlines() if line.strip()]
-        print(f"QA reusing a finished pass: {len(accepted)} accepted clips and their lists", flush=True)
-        return {"accepted": len(accepted), "passed_hours": round(sum(r["duration_s"] for r in accepted) / 3600, 2),
-                "cached": True}
+    metadata = work / "metadata.jsonl"
+    if metadata.exists():  # written only after a full transcription pass
+        accepted = [json.loads(line) for line in metadata.read_text().splitlines() if line.strip()]
+        summary = {"accepted": len(accepted),
+                   "passed_hours": round(sum(r["duration_s"] for r in accepted) / 3600, 2), "cached": True}
+        if all((work / name).exists() for name in ("train_list.txt", "val_list.txt")):
+            print(f"QA reusing a finished pass: {len(accepted)} accepted clips and their lists", flush=True)
+            return summary
+        print(f"QA reusing {len(accepted)} accepted clips from metadata.jsonl; building the lists", flush=True)
+        return _publish(work, prefix, accepted, summary)
     rows = [json.loads(line) for line in (work / "generated.jsonl").read_text().splitlines() if line.strip()]
     results_path = work / "qa_results.jsonl"  # one verdict per clip, appended as it is checked, so a rerun resumes
     done = {}
@@ -293,20 +298,23 @@ def qa_and_publish(work: Path, prefix: str) -> dict:
         raise RuntimeError("QA accepted no clips; nothing to train on")
     if passed_s < 10 * 3600:
         print(f"WARNING: QA passed only {passed_s / 3600:.2f} h (target 10-20 h); training on it anyway", flush=True)
-    metadata = work / "metadata.jsonl"
     metadata.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in accepted))
-    lists = prepare.prepare_lists(work)
+    return _publish(work, prefix, accepted, {
+        "accepted": len(accepted), "rejected": len(rejected), "passed_hours": round(passed_s / 3600, 2),
+        "passed_audio_s_per_wall_s": round(passed_s / max(wall, 0.001), 2),
+        "gpu": monitor.summary(), "acceptance_by_generation_streams": by_streams,
+    })
+
+
+def _publish(work: Path, prefix: str, accepted: list[dict], report: dict) -> dict:
+    """StyleTTS2 lists on the Volume, then the accepted dataset and QA report to R2."""
+    report = {**report, "lists": prepare.prepare_lists(work)}
     s3, bucket = cr.r2_client(), os.environ["R2_BUCKET_NAME"]
     uploads = dataset_publication_plan(work, prefix, accepted)
     t_up = time.perf_counter()
     with ThreadPoolExecutor(max_workers=32) as pool:  # ~5k small WAVs; one at a time took tens of GPU-minutes
         list(pool.map(lambda f: s3.upload_file(str(f[0]), bucket, f[1], ExtraArgs={"ContentType": f[2]}), uploads))
     print(f"QA uploaded {len(uploads)} dataset files in {time.perf_counter() - t_up:.0f}s", flush=True)
-    report = {
-        "accepted": len(accepted), "rejected": len(rejected), "passed_hours": round(passed_s / 3600, 2),
-        "passed_audio_s_per_wall_s": round(passed_s / max(wall, 0.001), 2),
-        "gpu": monitor.summary(), "lists": lists, "acceptance_by_generation_streams": by_streams,
-    }
     s3.put_object(Bucket=bucket, Key=f"{prefix}/dataset/qa_report.json",
                   Body=json.dumps(report, indent=2).encode(), ContentType="application/json")
     return report

@@ -17,8 +17,8 @@ import time
 TIMEOUT_S = 150 * 60
 # QA has returned (and its Volume commit happened) once the orchestrator moves past it.
 QA_FINISHED = ("STAGE done qa", "STAGE start training", "[train ", "CUDA_SETTINGS ", "CALIBRATION")
-# The old QA's hard 10 h floor raises before writing its lists; the new run then redoes QA.
-QA_FAILED = ("refusing an undersized training set", "QA left only")
+# Any stage error: Modal would retry it with the old app's code, so stop it and let the new run take over.
+QA_FAILED = ("refusing an undersized training set", "QA left only", "Traceback (most recent call last)")
 
 
 def observe(line: str) -> str | None:

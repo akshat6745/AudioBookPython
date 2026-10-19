@@ -118,7 +118,7 @@ def fake_qa_boundary(generated: list[dict]) -> list[dict]:
             assert wav.getframerate() == 24000
             assert wav.getnchannels() == 1
             duration = wav.getnframes() / wav.getframerate()
-        accepted.append({**row, "speaker": row["voice"], "duration_s": duration,
+        accepted.append({**row, "duration_s": duration,
                          "qa": {"ok": True, "adapter": "deterministic-cpu-fake"}})
     return accepted
 

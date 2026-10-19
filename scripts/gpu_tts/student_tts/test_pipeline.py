@@ -158,6 +158,31 @@ def test_handoff_waits_for_qa_to_return_before_stopping():
     assert h.observe('STAGE done qa: {"accepted": 5100}') == "qa-finished"
     assert h.observe("[train 23:59:01] GPU NVIDIA L40S 44.4 GB") == "qa-finished"  # attached after QA ended
     assert h.observe("RuntimeError: QA left only 9.10 h; refusing an undersized training set") == "qa-failed"
+    assert h.observe("Traceback (most recent call last):") == "qa-failed"  # e.g. KeyError: 'speaker'
+
+
+def test_qa_builds_missing_lists_from_a_finished_pass_without_transcribing(tmp_path, monkeypatch):
+    import json
+    import sys as _sys
+    import types
+
+    (tmp_path / "metadata.jsonl").write_text(json.dumps(
+        {"id": "a", "wav": "raw/a.wav", "voice": "dialogue", "text": "hello", "duration_s": 3.0}) + "\n")
+
+    def no_whisper(*_):
+        raise AssertionError("metadata.jsonl already holds the QA verdicts")
+
+    monkeypatch.setitem(_sys.modules, "check_audio", types.SimpleNamespace(transcribe_setup=no_whisper))
+    monkeypatch.setitem(_sys.modules, "verify", types.SimpleNamespace(check_clip=no_whisper))
+    built = []
+    monkeypatch.setattr(pipeline_worker.prepare, "prepare_lists", lambda work: built.append(work) or {"train": 1})
+    s3 = types.SimpleNamespace(upload_file=lambda *a, **k: None, put_object=lambda **k: None)
+    monkeypatch.setattr(pipeline_worker.cr, "r2_client", lambda: s3)
+    monkeypatch.setattr(pipeline_worker, "dataset_publication_plan", lambda work, prefix, accepted: [])
+    monkeypatch.setenv("R2_BUCKET_NAME", "fixture")
+
+    report = pipeline_worker.qa_and_publish(tmp_path, "prefix")
+    assert built and report["accepted"] == 1 and report["lists"] == {"train": 1}
 
 
 def test_queue_records_the_detached_app_id(tmp_path, monkeypatch):
@@ -308,7 +333,8 @@ def test_chunk_estimates_are_bounded_and_restate_emotion():
 
 def test_styletts2_list_format_uses_two_speaker_ids():
     root = Path("/dataset")
-    assert prepare.format_line(root, {"wav": "raw/a.wav", "speaker": "narrator"}, "fəˈnɛtɪks") == \
+    # Rows carry "voice" (from dataset.candidates), the same key production metadata.jsonl has.
+    assert prepare.format_line(root, {"wav": "raw/a.wav", "voice": "narrator"}, "fəˈnɛtɪks") == \
         "raw/a.wav|fəˈnɛtɪks|0"
-    assert prepare.format_line(root, {"wav": "raw/b.wav", "speaker": "dialogue"}, "həˈloʊ") == \
+    assert prepare.format_line(root, {"wav": "raw/b.wav", "voice": "dialogue"}, "həˈloʊ") == \
         "raw/b.wav|həˈloʊ|1"
