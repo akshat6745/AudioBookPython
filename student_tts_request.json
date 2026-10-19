@@ -1,7 +1,7 @@
 {
   "run": true,
   "gpu": "l40s",
-  "note": "Training run: reuse attempt-4 dataset + QA after handing off from its app",
-  "attempt": 5,
+  "note": "Training run: reuse attempt-4 dataset + metadata.jsonl after stopping its crashed QA retry",
+  "attempt": 6,
   "handoff_from_app": "ap-Bbzm6PX7CtwkhvvlWB5zFi"
 }
