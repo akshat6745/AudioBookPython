@@ -1,4 +1,4 @@
-"""Local worker processes. Children re-read credentials from the environment, never from argv."""
+"""Local worker processes. Credentials come from memory or the environment, never from argv."""
 
 from __future__ import annotations
 
@@ -66,7 +66,13 @@ def _process_entry(payload: dict) -> int:
             from .audio_stage import worker_loop
         else:
             raise RuntimeError(stage)
-        creds = load_credentials(prompt=False)
+        creds = payload.get("credentials")
+        if creds is None:
+            creds = load_credentials(prompt=False)
+        else:
+            from .redact import install
+
+            install(creds.secret_values())
         store = BotoStore.connect(creds)
         folder = work_dir(payload["run_id"], payload["worker_index"])
         log_path = folder / "worker.log"

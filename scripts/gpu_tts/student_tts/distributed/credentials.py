@@ -10,7 +10,20 @@ from pathlib import Path
 from .redact import install as install_redact
 
 KEYS = ("R2_ENDPOINT_URL", "R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
-SECRET_KEYS = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+# Redact both. Only the secret is hidden at the prompt; the access key id is typed in the clear.
+REDACT_KEYS = ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY")
+HIDDEN_KEY = "R2_SECRET_ACCESS_KEY"
+API_TOKEN_NOTE = (
+    "A Cloudflare API token alone is not enough for S3. "
+    "It is not the Secret Access Key. "
+    "R2 S3 needs the endpoint URL, bucket, Access Key ID, and Secret Access Key."
+)
+PROMPTS = {
+    "R2_ENDPOINT_URL": "R2 endpoint URL (https://<account-id>.r2.cloudflarestorage.com): ",
+    "R2_BUCKET_NAME": "R2 bucket name: ",
+    "R2_ACCESS_KEY_ID": "R2 Access Key ID: ",
+    "R2_SECRET_ACCESS_KEY": "R2 Secret Access Key (hidden; not a Cloudflare API token): ",
+}
 
 
 class CredentialsError(Exception):
@@ -62,8 +75,19 @@ def candidate_files(environ: dict[str, str] | None = None, cwd: Path | None = No
     return paths
 
 
-def load_credentials(environ: dict[str, str] | None = None, cwd: Path | None = None, prompt: bool | None = None) -> Credentials:
-    """Env vars win over a gitignored file. A Cloudflare API token is not an S3 credential."""
+def load_credentials(
+    environ: dict[str, str] | None = None,
+    cwd: Path | None = None,
+    prompt: bool | None = None,
+    *,
+    tty: bool | None = None,
+) -> Credentials:
+    """Env vars win over a gitignored file. Prompt only for names that are still missing.
+
+    Prompted values stay in the returned object. They are not written to disk or argv.
+    ``prompt=False`` (``--non-interactive``) never asks. A non-TTY stdin never asks either,
+    so a pipe cannot hang. A Cloudflare API token is not an S3 credential.
+    """
     env = dict(os.environ if environ is None else environ)
     file_vals: dict[str, str] = {}
     for path in candidate_files(env, cwd):
@@ -77,22 +101,28 @@ def load_credentials(environ: dict[str, str] | None = None, cwd: Path | None = N
         elif file_vals.get(key):
             found[key] = file_vals[key]
     missing = [key for key in KEYS if not found.get(key)]
-    interactive = sys.stdin.isatty() if prompt is None else prompt
-    if missing and interactive and environ is None:
+    if prompt is False:
+        interactive = False
+    else:
+        interactive = sys.stdin.isatty() if tty is None else bool(tty)
+    if missing and interactive:
         import getpass
 
-        for key in missing:
-            if key in SECRET_KEYS:
-                found[key] = getpass.getpass(f"{key} (hidden): ")
+        print(API_TOKEN_NOTE, file=sys.stderr)
+        for key in list(missing):
+            if key == HIDDEN_KEY:
+                value = getpass.getpass(PROMPTS[key])
             else:
-                found[key] = input(f"{key}: ")
+                value = input(PROMPTS[key])
+            found[key] = value.strip()
         missing = [key for key in KEYS if not found.get(key)]
     if missing:
         raise CredentialsError(
             "Missing R2 settings: "
             + ", ".join(missing)
-            + ". A Cloudflare API token alone is not enough for S3. "
-            + "Set R2_ENDPOINT_URL, R2_BUCKET_NAME, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY "
+            + ". "
+            + API_TOKEN_NOTE
+            + " Set R2_ENDPOINT_URL, R2_BUCKET_NAME, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY "
             + "in the environment or a gitignored env file. Create a bucket-scoped R2 access key."
         )
     creds = Credentials(

@@ -17,15 +17,15 @@ from scripts.gpu_tts.student_tts.distributed import layout
 from scripts.gpu_tts.student_tts.distributed.audio_publish import publish_chapter_audio
 from scripts.gpu_tts.student_tts.distributed.batching import call_reducing, group_batches, resolve_batch
 from scripts.gpu_tts.student_tts.distributed.chapters import pending_chapters, select_chapters
-from scripts.gpu_tts.student_tts.distributed.cli import build_parser, parse_args
-from scripts.gpu_tts.student_tts.distributed.credentials import CredentialsError, load_credentials
+from scripts.gpu_tts.student_tts.distributed.cli import build_parser, main, parse_args
+from scripts.gpu_tts.student_tts.distributed.credentials import Credentials, CredentialsError, load_credentials
 from scripts.gpu_tts.student_tts.distributed.deviceutil import select_device
 from scripts.gpu_tts.student_tts.distributed.exitcodes import EXIT_INCOMPLETE, EXIT_INVALID, EXIT_OK, EXIT_SETUP
 from scripts.gpu_tts.student_tts.distributed.hashing import HashMismatch, commit_download, sha256_bytes
 from scripts.gpu_tts.student_tts.distributed.leases import LEASE_TTL_S, claim_chapter, is_stale
 from scripts.gpu_tts.student_tts.distributed.orchestrate import execute
 from scripts.gpu_tts.student_tts.distributed.publish import publish_novel_tree
-from scripts.gpu_tts.student_tts.distributed.redact import install, redact
+from scripts.gpu_tts.student_tts.distributed.redact import clear, install, redact
 from scripts.gpu_tts.student_tts.distributed.registry import remedy
 from scripts.gpu_tts.student_tts.distributed.report import write_report
 from scripts.gpu_tts.student_tts.distributed.store import ConflictError, FakeStore
@@ -148,6 +148,184 @@ def test_credentials_and_redaction(tmp_path, monkeypatch):
     write_report(path, {"novel": "x", "detail": "leak supersecretvalue"})
     assert "supersecretvalue" not in path.read_text()
     assert redact("supersecretvalue") == "***"
+
+
+HELP_ARGV = (
+    ["--help"],
+    ["-h"],
+    ["run", "--help"],
+    ["run", "-h"],
+    ["validate", "--help"],
+    ["status", "--help"],
+    ["setup", "--help"],
+    ["publish-runtime", "--help"],
+    ["publish-novel", "--help"],
+    ["--non-interactive", "--help"],
+)
+
+SECRET = "prompted-secret-value"
+
+
+def _isolate_credentials(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.gpu_tts.student_tts.distributed.credentials.Path.home", lambda: tmp_path / "home")
+    for key in ("R2_ENDPOINT_URL", "R2_BUCKET_NAME", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AUDIOBOOK_R2_ENV"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_help_exits_zero_without_credentials_or_r2(monkeypatch, capsys):
+    def boom(*_args, **_kwargs):
+        raise AssertionError("help loaded credentials or opened R2")
+
+    monkeypatch.setattr("scripts.gpu_tts.student_tts.distributed.credentials.load_credentials", boom)
+    monkeypatch.setattr("scripts.gpu_tts.student_tts.distributed.store.BotoStore.connect", boom)
+    for argv in HELP_ARGV:
+        assert main(argv) == EXIT_OK, argv
+        captured = capsys.readouterr()
+        assert "usage:" in captured.out
+        assert SECRET not in captured.out + captured.err
+    top = main(["--help"])
+    assert top == EXIT_OK
+    top_out = capsys.readouterr().out
+    assert "publish-novel" in top_out and "--non-interactive" in top_out
+    assert main(["run", "--help"]) == EXIT_OK
+    run_out = capsys.readouterr().out
+    assert "--batch-size" in run_out and "--non-interactive" in run_out
+    assert main(["run"]) == 2
+    assert main([]) == EXIT_SETUP
+    assert main(["run", "--novel", "Book", "--workers", "0"], store=FakeStore()) == EXIT_SETUP
+
+
+def test_help_process_exit_codes():
+    for argv in (["--help"], ["run", "--help"], ["validate", "--help"], ["status", "--help"], ["setup", "--help"], ["publish-runtime", "--help"], ["publish-novel", "--help"]):
+        proc = subprocess.run(
+            [sys.executable, "-m", "scripts.gpu_tts.student_tts.distributed", *argv],
+            cwd=ROOT, capture_output=True, text=True, timeout=20,
+        )
+        assert proc.returncode == 0, (argv, proc.returncode, proc.stderr)
+        assert "usage:" in proc.stdout
+        assert SECRET not in proc.stdout + proc.stderr
+
+
+def test_interactive_prompt_and_noninteractive_failure(tmp_path, monkeypatch, capsys):
+    _isolate_credentials(monkeypatch, tmp_path)
+    calls = []
+
+    def fake_input(prompt=""):
+        calls.append(("input", prompt))
+        mapping = {
+            "endpoint": "https://example.r2.cloudflarestorage.com",
+            "bucket": "bucket-name",
+            "Access Key ID": "AKIDEXAMPLE",
+        }
+        for needle, value in mapping.items():
+            if needle in prompt:
+                return value
+        raise AssertionError(prompt)
+
+    def fake_getpass(prompt=""):
+        calls.append(("getpass", prompt))
+        return SECRET
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    monkeypatch.setattr("getpass.getpass", fake_getpass)
+    try:
+        creds = load_credentials(environ={}, cwd=tmp_path, prompt=None, tty=True)
+        assert creds.endpoint_url == "https://example.r2.cloudflarestorage.com"
+        assert creds.bucket == "bucket-name"
+        assert creds.access_key_id == "AKIDEXAMPLE"
+        assert creds.secret_access_key == SECRET
+        assert repr(creds) == "Credentials(redacted)"
+        assert [kind for kind, _prompt in calls] == ["input", "input", "input", "getpass"]
+        assert all("API token" in prompt for _kind, prompt in calls if _kind == "getpass")
+        captured = capsys.readouterr()
+        assert SECRET not in captured.out + captured.err
+        assert "not enough for S3" in captured.err
+        report = tmp_path / "report.json"
+        write_report(report, {"detail": f"leak {SECRET}", "novel": "x"})
+        assert SECRET not in report.read_text()
+        log_path = tmp_path / "worker.log"
+        log_path.write_text(redact(f"worker saw {SECRET}\n"))
+        assert SECRET not in log_path.read_text()
+    finally:
+        clear()
+
+    calls.clear()
+    filled = {
+        "R2_ENDPOINT_URL": "https://example.r2.cloudflarestorage.com",
+        "R2_BUCKET_NAME": "bucket-name",
+        "R2_ACCESS_KEY_ID": "AKIDEXAMPLE",
+        "R2_SECRET_ACCESS_KEY": SECRET,
+    }
+    load_credentials(environ=filled, cwd=tmp_path, prompt=None, tty=True)
+    assert calls == []
+    partial = dict(filled)
+    del partial["R2_SECRET_ACCESS_KEY"]
+    try:
+        creds = load_credentials(environ=partial, cwd=tmp_path, prompt=None, tty=True)
+        assert creds.secret_access_key == SECRET
+        assert [kind for kind, _prompt in calls] == ["getpass"]
+    finally:
+        clear()
+    calls.clear()
+    file_dir = tmp_path / "fromfile"
+    file_dir.mkdir()
+    (file_dir / ".env").write_text("\n".join(f'{key}="{value}"' for key, value in filled.items()) + "\n")
+    load_credentials(environ={}, cwd=file_dir, prompt=None, tty=True)
+    assert calls == []
+    clear()
+
+    with pytest.raises(CredentialsError) as raised:
+        load_credentials(environ={}, cwd=tmp_path / "empty", prompt=None, tty=False)
+    assert "R2_SECRET_ACCESS_KEY" in str(raised.value)
+    assert SECRET not in str(raised.value)
+    assert calls == []
+    with pytest.raises(CredentialsError):
+        load_credentials(environ={}, cwd=tmp_path / "empty", prompt=False, tty=True)
+    assert calls == []
+
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    monkeypatch.chdir(bare)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    captured_creds = {}
+
+    def connect(creds):
+        captured_creds["creds"] = creds
+        return FakeStore()
+
+    monkeypatch.setattr("scripts.gpu_tts.student_tts.distributed.store.BotoStore.connect", connect)
+    code = main(["--non-interactive", "run", "--novel", "Book"])
+    assert code == EXIT_SETUP
+    assert "creds" not in captured_creds
+    text = "".join(capsys.readouterr())
+    assert "R2_ENDPOINT_URL" in text and SECRET not in text
+    code = main(["run", "--novel", "Book"])
+    assert captured_creds["creds"].secret_access_key == SECRET
+    assert repr(captured_creds["creds"]) == "Credentials(redacted)"
+    text = "".join(capsys.readouterr())
+    assert SECRET not in text
+    clear()
+
+
+def test_prompted_credentials_stay_in_memory(tmp_path, monkeypatch):
+    store = FakeStore()
+    book = write_book(tmp_path, {1: "Hello there."})
+    publish_novel_tree(store, name="The Eye of the World", slug="the-eye-of-the-world", source_dir=book, chapters=[1])
+    creds = Credentials("https://example.r2.cloudflarestorage.com", "bucket-name", "AKIDEXAMPLE", SECRET)
+    captured = {}
+
+    def fake_run(stage, count, payload):
+        captured["payload"] = payload
+        captured["stage"] = stage
+        return 0
+
+    monkeypatch.setattr("scripts.gpu_tts.student_tts.distributed.orchestrate.run_processes", fake_run)
+    code = execute(args(tmp_path, stage="tag"), store, inline=False, credentials=creds)
+    assert code == EXIT_OK
+    assert captured["payload"]["credentials"] is creds
+    visible = {key: value for key, value in captured["payload"].items() if key != "credentials"}
+    assert SECRET not in repr(visible)
 
 
 def test_registry_remedy_and_range(tmp_path):

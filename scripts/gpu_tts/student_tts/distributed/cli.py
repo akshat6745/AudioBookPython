@@ -13,15 +13,28 @@ import argparse
 import sys
 from pathlib import Path
 
-from .exitcodes import EXIT_INTERRUPTED, EXIT_SETUP, EXIT_UNEXPECTED
+from .exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_SETUP, EXIT_UNEXPECTED
+
+COMMANDS = ("run", "validate", "status", "setup", "publish-runtime", "publish-novel")
+HELP_FLAGS = {"-h", "--help"}
+
+
+def _add_noninteractive(cmd: argparse.ArgumentParser) -> None:
+    cmd.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="do not prompt for R2 settings; missing names exit 4",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="audiobook-worker")
     parser.add_argument("--novel", help="registered novel title, used when no subcommand is given")
+    _add_noninteractive(parser)
     sub = parser.add_subparsers(dest="command")
 
     def add_common(cmd: argparse.ArgumentParser, default_stage: str) -> None:
+        _add_noninteractive(cmd)
         cmd.add_argument("--novel", required=True)
         cmd.add_argument("--stage", default=default_stage, choices=("tag", "audio", "render", "all"),
                          help="tag, audio (alias render), or all. Default: %(default)s")
@@ -46,9 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="alias of validate")
     add_common(status, "all")
 
-    sub.add_parser("setup", help="create the local cache: StyleTTS2 commit, patch, artifact download")
+    setup = sub.add_parser("setup", help="create the local cache: StyleTTS2 commit, patch, artifact download")
+    _add_noninteractive(setup)
 
     pub_rt = sub.add_parser("publish-runtime", help="upload versioned private runtime artifacts")
+    _add_noninteractive(pub_rt)
     pub_rt.add_argument("--checkpoint", type=Path, required=True)
     pub_rt.add_argument("--config", type=Path, required=True)
     pub_rt.add_argument("--asr", type=Path, required=True)
@@ -62,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     pub_rt.add_argument("--deberta-base", type=Path, required=True)
 
     pub_novel = sub.add_parser("publish-novel", help="register a private novel source and optional tags")
+    _add_noninteractive(pub_novel)
     pub_novel.add_argument("--name", required=True)
     pub_novel.add_argument("--source-dir", type=Path, required=True)
     pub_novel.add_argument("--tags-dir", type=Path)
@@ -70,10 +86,43 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _prepare_argv(argv: list[str]) -> list[str]:
+    """Keep top-level help as top-level help. A leading option otherwise selects ``run``."""
+    if not argv or argv[0] in HELP_FLAGS:
+        return argv
+    noninteractive = False
+    if argv[0] == "--non-interactive":
+        noninteractive = True
+        argv = list(argv[1:])
+        while argv and argv[0] == "--non-interactive":
+            argv = argv[1:]
+        if not argv or argv[0] in HELP_FLAGS:
+            return argv
+    if argv[0] in COMMANDS:
+        if noninteractive:
+            return [argv[0], "--non-interactive", *argv[1:]]
+        return argv
+    if argv[0].startswith("--"):
+        head = ["run", "--non-interactive"] if noninteractive else ["run"]
+        return [*head, *argv]
+    if noninteractive:
+        return ["--non-interactive", *argv]
+    return argv
+
+
+def _status_from_exit(exc: SystemExit) -> int:
+    """Argparse help uses status 0. Do not turn that into the setup code."""
+    code = exc.code
+    if code is None or code == 0:
+        return EXIT_OK
+    if isinstance(code, int):
+        return code
+    print(exc)
+    return EXIT_SETUP
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0].startswith("--"):
-        argv = ["run", *argv]
+    argv = _prepare_argv(list(sys.argv[1:] if argv is None else argv))
     args = build_parser().parse_args(argv)
     if args.command is None:
         raise SystemExit("choose run, validate, status, setup, publish-runtime, or publish-novel")
@@ -98,28 +147,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.reset_batch_profile = False
     if not hasattr(args, "report_json"):
         args.report_json = None
+    if not hasattr(args, "non_interactive"):
+        args.non_interactive = False
     return args
+
+
+def _open_store(args, store):
+    """Return (store, credentials). Credentials stay in memory and are not written out."""
+    if store is not None:
+        return store, None
+    from .credentials import load_credentials
+    from .store import BotoStore
+
+    creds = load_credentials(prompt=False if args.non_interactive else None)
+    return BotoStore.connect(creds), creds
 
 
 def main(argv: list[str] | None = None, store=None) -> int:
     try:
         args = parse_args(argv)
     except SystemExit as exc:
-        if isinstance(exc.code, int):
-            return exc.code or EXIT_SETUP
-        print(exc)
+        return _status_from_exit(exc)
+    from .credentials import CredentialsError
+
+    try:
+        store, creds = _open_store(args, store)
+    except CredentialsError as exc:
+        print(str(exc))
         return EXIT_SETUP
     if args.command == "setup":
         from .bootstrap import setup
-        from .credentials import CredentialsError, load_credentials
-        from .store import BotoStore
 
-        try:
-            creds = load_credentials(prompt=False) if store is None else None
-        except CredentialsError as exc:
-            print(str(exc))
-            return EXIT_SETUP
-        setup(store or BotoStore.connect(creds))
+        setup(store)
         return 0
     if args.command == "publish-runtime":
         from .publish import publish_runtime
@@ -129,16 +188,11 @@ def main(argv: list[str] | None = None, store=None) -> int:
         from .publish import publish_novel
 
         return publish_novel(args, store)
-    from .credentials import CredentialsError, load_credentials
     from .orchestrate import execute
-    from .store import BotoStore
 
     try:
-        if store is None:
-            creds = load_credentials(prompt=False)
-            store = BotoStore.connect(creds)
         inline = False if store.__class__.__name__ == "BotoStore" else True
-        return int(execute(args, store, inline=inline))
+        return int(execute(args, store, inline=inline, credentials=creds))
     except CredentialsError as exc:
         print(str(exc))
         return EXIT_SETUP

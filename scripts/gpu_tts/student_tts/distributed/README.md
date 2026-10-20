@@ -48,7 +48,15 @@ S3 access needs all four of these settings. A Cloudflare API token does not sign
 | `R2_ACCESS_KEY_ID` | `<access-key-id>` |
 | `R2_SECRET_ACCESS_KEY` | `<secret-access-key>` |
 
-`audiobook-worker` reads the process environment first, then the first file that exists among `$AUDIOBOOK_R2_ENV`, `./.env`, and `~/.config/audiobook-worker/r2.env`. `.env` is gitignored. The commands call the loader with prompting disabled, so a missing name exits 4 instead of asking. The loader can use a hidden prompt only when a caller leaves prompting on and stdin is a terminal.
+`audiobook-worker` reads the process environment first, then the first file that exists among `$AUDIOBOOK_R2_ENV`, `./.env`, and `~/.config/audiobook-worker/r2.env`. `.env` is gitignored. On a terminal, each name that is still missing is prompted. Endpoint URL, bucket, and Access Key ID are normal prompts. The Secret Access Key uses a hidden prompt and is not echoed. The prompt states that a Cloudflare API token is not that S3 secret. Entered values stay in process memory for that run and its workers. They are not written to a file, placed on the command line, or copied into logs or reports.
+
+If stdin is not a terminal, there is no prompt. `--non-interactive` does the same on a terminal, which is what CI should pass. Either way a missing name exits 4 and the message lists the missing names only.
+
+```bash
+./audiobook-worker --non-interactive run --novel "The Eye of the World" --stage tag --validate
+```
+
+`--help` never prompts and does not contact R2.
 
 Python 3.11 is required (`python3.11` on `PATH`). `ffmpeg` and `espeak-ng` must be on `PATH`. Encoding uses ffmpeg's `libopus` encoder. `./bootstrap.sh` installs the inference stack from public PyPI with `PIP_CONFIG_FILE=/dev/null`. It does not use CodeArtifact.
 
@@ -194,6 +202,8 @@ Exit codes:
 | 4 | Setup, credentials, an unregistered novel, a missing source manifest, or a chapter outside the source manifest. |
 | 130 | Interrupted (Ctrl-C). |
 
+Help exits 0. A missing required option or an unknown command exits 2 before credentials are loaded. That is argparse's usage status, not a finished run whose chapters are still missing.
+
 ## Interruption and resume
 
 If tags through chapter 18 validate, start the tag stage again. It lists every selected chapter in R2. Chapter 19 is tagged when it is missing or stale, including when chapter 20 is already valid. Chapters that already validate are not claimed.
@@ -245,6 +255,7 @@ Source and tag validation for Eye chapters 1–54 both returned 54 valid at that
 ## Operations
 
 ```bash
+./audiobook-worker --help
 ./audiobook-worker run --help
 ./audiobook-worker validate --help
 ./audiobook-worker status --help
@@ -253,7 +264,7 @@ Source and tag validation for Eye chapters 1–54 both returned 54 valid at that
 ./audiobook-worker publish-novel --help
 ```
 
-A leading `--` is read as `run`, so `./audiobook-worker --help` prints `run` help rather than the subcommand list. With no arguments the process prints `choose run, validate, status, setup, publish-runtime, or publish-novel` and exits 4. Help itself prints the usage above and then exits 4 as well: argparse uses status 0, and the worker returns that 0 as the setup code. The usage text is still the command reference. `status` is `validate`. `run --status` is also validate-only and does not tag or render.
+Each of these prints usage and exits 0. They do not load credentials, load models, or call R2. `./audiobook-worker --help` is the command list. A leading option other than help still selects `run`, so `./audiobook-worker --novel "The Eye of the World"` is `run`. With no arguments the process prints `choose run, validate, status, setup, publish-runtime, or publish-novel` and exits 4. `status` is `validate`. `run --status` is also validate-only and does not tag or render. There is no `cleanup` subcommand.
 
 Stop a run with Ctrl-C. The parent sends SIGINT to worker processes and exits 130. An owned lease is marked `released`. If the network write fails, the lease stays until the 20-minute TTL and another worker can take it. Do not delete the lease object.
 
@@ -312,7 +323,7 @@ A later commit on the same branch, `f6f8c9a4586bd6d300d167a361d1143a0b318a39`, k
 
 | What you see | What to do |
 | --- | --- |
-| Missing `R2_ACCESS_KEY_ID` or a complaint that an API token is not enough | Create a bucket-scoped R2 S3 key. Set the four `R2_*` names in the environment or a gitignored env file. A Cloudflare API token will not authenticate these calls. |
+| Missing `R2_ACCESS_KEY_ID` or a complaint that an API token is not enough | Create a bucket-scoped R2 S3 key. On a terminal the worker asks for the missing names; the secret is hidden. A pipe or `--non-interactive` exits 4 and lists those names. A Cloudflare API token will not authenticate these calls. |
 | Exit 4 and "not registered in the private R2 novel index" | Register a local source with `publish-novel`. A novel name does not fetch the book. |
 | "refusing to load StyleTTS" or exit 2 from the audio stage | Finish `--stage tag` and `validate --stage tag` first, or pass `--allow-partial-tags` to render only chapters that already have valid tags. |
 | A chapter stays `leased` | The owner heartbeats for up to 20 minutes. Ctrl-C on that machine releases it when the release write succeeds. After the TTL, the next worker takes the lease. Leave the lease object in place. |

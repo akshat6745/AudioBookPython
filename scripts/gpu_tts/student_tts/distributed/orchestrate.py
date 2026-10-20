@@ -24,7 +24,7 @@ def _now():
     return time.time()
 
 
-def execute(args, store, *, now_fn=None, tagger=None, renderer=None, torch_mod=None, inline: bool | None = None) -> int:
+def execute(args, store, *, now_fn=None, tagger=None, renderer=None, torch_mod=None, inline: bool | None = None, credentials=None) -> int:
     now_fn = now_fn or _now
     try:
         novel = resolve_novel(load_index(store), args.novel)
@@ -49,9 +49,9 @@ def execute(args, store, *, now_fn=None, tagger=None, renderer=None, torch_mod=N
         return _validate(args, store, novel, source, chapters, stage, now_fn)
     code = EXIT_OK
     if stage in {"tag", "all"}:
-        code = merge_codes(code, _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline))
+        code = merge_codes(code, _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline, credentials))
     if stage in {"audio", "all"} and code not in {EXIT_SETUP}:
-        code = merge_codes(code, _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline))
+        code = merge_codes(code, _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline, credentials))
     if getattr(args, "validate", False):
         code = merge_codes(code, _validate(args, store, novel, source, chapters, stage, now_fn))
     return code
@@ -95,7 +95,7 @@ def _batch(args, stage: str, device: str) -> int:
     return batch
 
 
-def _launch(stage, args, store, source, chapters, batch, device, now_fn, loop, extra, inline):
+def _launch(stage, args, store, source, chapters, batch, device, now_fn, loop, extra, inline, credentials=None):
     run_id = getattr(args, "run_id", None) or uuid.uuid4().hex
     host = socket.gethostname()
     count = max(1, int(args.workers))
@@ -110,6 +110,9 @@ def _launch(stage, args, store, source, chapters, batch, device, now_fn, loop, e
             "device": device,
             "namespace": __import__("os").environ.get("AUDIOBOOK_WORKER_NAMESPACE", ""),
         }
+        if credentials is not None:
+            # In-memory handoff. Not argv, not a file, and not copied into the environment.
+            payload["credentials"] = credentials
         return run_processes(stage, count, payload)
     calls = []
     state = getattr(args, "state", None)
@@ -132,16 +135,16 @@ def _launch(stage, args, store, source, chapters, batch, device, now_fn, loop, e
     return run_threads(calls)
 
 
-def _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline) -> int:
+def _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline, credentials=None) -> int:
     device = _device(args, torch_mod)
     batch = _batch(args, "tag", device)
     extra = {}
     if tagger is not None:
         extra["tagger"] = tagger
-    return _launch("tag", args, store, source, chapters, batch, device, now_fn, tag_loop, extra, inline)
+    return _launch("tag", args, store, source, chapters, batch, device, now_fn, tag_loop, extra, inline, credentials)
 
 
-def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline) -> int:
+def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline, credentials=None) -> int:
     code, rows, summary = preflight_tags(
         store, source, chapters, now=now_fn(), allow_partial=bool(getattr(args, "allow_partial_tags", False)),
     )
@@ -170,4 +173,4 @@ def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inlin
     if renderer is not None:
         extra["renderer"] = renderer
     # Only hand the worker chapters that are allowed to render.
-    return _launch("audio", args, store, source, _work, batch, device, now_fn, audio_loop, extra, inline)
+    return _launch("audio", args, store, source, _work, batch, device, now_fn, audio_loop, extra, inline, credentials)
