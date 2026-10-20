@@ -118,6 +118,10 @@ def publish_runtime(args, store=None) -> int:
             "files": files,
         })
         tagger_files = []
+        cache_prefix = tagger_artifact_key("").rstrip("/")
+        for head in store.list(cache_prefix):
+            if "/.cache/" in head.key:
+                store.delete(head.key)
         for name, path in (("deberta3large_teacher2", args.deberta_large), ("deberta3_base_slot", args.deberta_base)):
             logical = "deberta3large_teacher2" if "large" in name else "deberta3_teacher2"
             print(f"publishing tagger {logical}", flush=True)
@@ -203,11 +207,25 @@ def _publish_tagger_dir(store, name: str, path: Path) -> list[dict]:
     _upload_path(store, key, weights)
     _verify(store, key, digest, size)
     uploaded.append({"name": f"{name}/model.safetensors", "key": key, "sha256": digest, "bytes": size})
+    allow = {
+        "config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "spm.model",
+        "added_tokens.json",
+    }
     with tempfile.TemporaryDirectory(prefix="tagger-hf-") as temporary:
-        hf = Path(temporary)
+        hf = Path(temporary) / "snapshot"
         _snapshot_tokenizer(config["base"], config.get("revision"), hf)
-        for file_path in sorted(item for item in hf.rglob("*") if item.is_file()):
-            relative = f"{name}/hf/{file_path.relative_to(hf).as_posix()}"
+        clean = Path(temporary) / "clean"
+        clean.mkdir()
+        for filename in sorted(allow):
+            source = hf / filename
+            if source.is_file():
+                (clean / filename).write_bytes(source.read_bytes())
+        for file_path in sorted(item for item in clean.iterdir() if item.is_file()):
+            relative = f"{name}/hf/{file_path.name}"
             digest, size = sha256_file(file_path)
             key = tagger_artifact_key(relative)
             _upload_path(store, key, file_path)
@@ -237,8 +255,18 @@ def _write_manifest(store, key: str, payload: dict) -> None:
         store.put_bytes(key, body, content_type="application/json", if_none_match="*")
         return
     existing = store.get_bytes(key)
-    if sha256_bytes(existing) != sha256_bytes(body):
+    if sha256_bytes(existing) == sha256_bytes(body):
+        return
+    # A manifest that lists Hugging Face download-cache files is not a published
+    # runtime. Replace that one object with If-Match. Do not replace any other manifest.
+    try:
+        previous = json.loads(existing.decode())
+    except json.JSONDecodeError:
+        previous = {}
+    stale_cache = any("/.cache/" in str(item.get("name", "")) for item in previous.get("files") or [])
+    if not stale_cache:
         raise ConflictError(f"runtime manifest {key} already differs; refusing to replace it")
+    store.put_bytes(key, body, content_type="application/json", if_match=head.etag)
 
 
 def publish_novel(args, store=None) -> int:
