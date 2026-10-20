@@ -8,6 +8,10 @@ This is a Python FastAPI backend service that provides APIs to:
 5. Upload and parse EPUBs (metadata to D1/R2, images to Supabase)
 6. Manage user authentication and reading progress (using Cloudflare D1)
 
+## Distributed audiobook worker
+
+A separate R2-backed worker tags chapters and renders StyleTTS2 audio for a novel that is already registered in the private bucket. Several machines share that work through R2 leases. Setup, the staged commands, and the object layout are in [scripts/gpu_tts/student_tts/distributed/README.md](scripts/gpu_tts/student_tts/distributed/README.md). The worker is on branch [`student-tts-r2-worker`](https://github.com/akshat6745/AudioBookPython/tree/student-tts-r2-worker).
+
 ## Architecture
 
 The backend previously relied entirely on Supabase/PostgreSQL. It has now been migrated to a modern edge-ready architecture for massive scalability:
