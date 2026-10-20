@@ -49,3 +49,7 @@ downloads/
 # Stray artifact from the old React Native app (audiobook-mobile) — this is
 # a Python service, not an npm package.
 package.json
+
+# Local R2 worker runtime (never commit)
+.venv-r2worker/
+.audiobook-worker/

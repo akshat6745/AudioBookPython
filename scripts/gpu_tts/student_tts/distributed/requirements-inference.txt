@@ -1,0 +1,16 @@
+# Public PyPI only. Install with PIP_CONFIG_FILE=/dev/null.
+# Pins match the machine that produced the Eye student renders.
+torch==2.14.1
+torchaudio==2.11.0
+numpy==2.4.6
+PyYAML==6.0.3
+phonemizer==3.4.0
+munch==4.0.0
+transformers==4.49.0
+safetensors==0.8.0
+einops==0.8.2
+einops-exts==0.0.4
+boto3==1.42.54
+botocore==1.42.54
+huggingface_hub==0.36.2
+soundfile==0.14.0

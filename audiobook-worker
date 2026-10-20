@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# One-command worker. Secrets stay in the environment or a gitignored file.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT"
+if [[ -x "$ROOT/.venv-r2worker/bin/python" ]]; then
+  PY="$ROOT/.venv-r2worker/bin/python"
+elif command -v python3.11 >/dev/null 2>&1; then
+  PY="$(command -v python3.11)"
+else
+  echo "Run ./bootstrap.sh first (Python 3.11)." >&2
+  exit 1
+fi
+export PIP_CONFIG_FILE=/dev/null
+exec "$PY" -m scripts.gpu_tts.student_tts.distributed "$@"
