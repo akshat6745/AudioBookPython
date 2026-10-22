@@ -1,7 +1,9 @@
 """Read-only /student-audio allowlist.
 
-The player calls GET /student-audio/<r2-key>. These tests drive the handler
-directly, with a fake R2 client, matching the other API tests in this repo.
+The player can call GET /student-audio/<r2-key> or
+GET /student-audio/paragraph?novel=&chapter=&paragraph=. These tests drive
+the handlers directly, with a fake R2 client, matching the other API tests
+in this repo.
 """
 
 import asyncio
@@ -10,12 +12,15 @@ import inspect
 import pytest
 from botocore.exceptions import ClientError
 from fastapi import HTTPException
+from starlette.routing import Match
 
 from app.api.deps import AuthenticatedUser, get_current_user
 from app.api.student_audio import (
     STUDENT_AUDIO_PREFIX,
     content_type_for_student_audio,
     get_student_audio,
+    get_student_audio_paragraph,
+    student_audio_key_from_params,
     validate_student_audio_key,
 )
 from app.main import app
@@ -94,13 +99,30 @@ def _collect(response) -> bytes:
 def test_route_is_mounted_and_requires_the_bearer_token():
     paths = [getattr(route, "path", None) for route in app.routes]
     assert "/student-audio/{object_key:path}" in paths
-    methods = next(
-        route.methods
-        for route in app.routes
-        if getattr(route, "path", None) == "/student-audio/{object_key:path}"
+    assert "/student-audio/paragraph" in paths
+    assert paths.index("/student-audio/paragraph") < paths.index(
+        "/student-audio/{object_key:path}"
     )
-    assert methods == {"GET"}
-    assert _dependency(get_student_audio, "caller") is get_current_user
+    for path, handler in (
+        ("/student-audio/{object_key:path}", get_student_audio),
+        ("/student-audio/paragraph", get_student_audio_paragraph),
+    ):
+        methods = next(
+            route.methods
+            for route in app.routes
+            if getattr(route, "path", None) == path
+        )
+        assert methods == {"GET"}
+        assert _dependency(handler, "caller") is get_current_user
+
+    scope = {"type": "http", "path": "/student-audio/paragraph", "method": "GET"}
+    matched = None
+    for route in app.routes:
+        match, _child = route.matches(scope)
+        if match == Match.FULL:
+            matched = route
+            break
+    assert getattr(matched, "path", None) == "/student-audio/paragraph"
 
 
 @pytest.mark.parametrize(
@@ -189,3 +211,101 @@ def test_r2_failure_does_not_echo_the_client_error(monkeypatch):
 
     assert exc.value.status_code == 502
     assert "secret-bucket-detail" not in str(exc.value.detail)
+
+
+def test_paragraph_params_name_the_same_objects_as_the_path_route():
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "0")
+        == f"{EYE}/chapter_1/0.opus"
+    )
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "title")
+        == f"{EYE}/chapter_1/title.opus"
+    )
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "chapter")
+        == f"{EYE}/chapter_1/chapter.opus"
+    )
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "45")
+        == f"{EYE}/chapter_1/45.opus"
+    )
+
+
+@pytest.mark.parametrize(
+    "paragraph,filename,payload",
+    [
+        ("0", "0.opus", b"OggS-paragraph-0"),
+        ("title", "title.opus", b"OggS-title"),
+        ("chapter", "chapter.opus", b"OggS-chapter"),
+        ("45", "45.opus", b"OggS-paragraph-45"),
+    ],
+)
+def test_paragraph_request_streams_the_stored_opus_file(
+    monkeypatch, paragraph, filename, payload
+):
+    key = f"{EYE}/chapter_1/{filename}"
+    other = f"{EYE}/chapter_1/1.opus"
+    fake = _install(monkeypatch, {key: payload, other: b"OggS-not-this"})
+
+    response = _run(
+        get_student_audio_paragraph(
+            "the-eye-of-the-world",
+            "1",
+            paragraph,
+            caller=_caller(),
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.media_type == "audio/ogg"
+    assert response.headers["content-length"] == str(len(payload))
+    assert _collect(response) == payload
+    assert fake.calls == [("get_object", "test-bucket", key)]
+
+
+def test_missing_paragraph_file_is_not_found(monkeypatch):
+    fake = _install(monkeypatch, {})
+
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            get_student_audio_paragraph(
+                "the-eye-of-the-world",
+                "1",
+                "999",
+                caller=_caller(),
+            )
+        )
+
+    assert exc.value.status_code == 404
+    assert fake.calls == [("get_object", "test-bucket", f"{EYE}/chapter_1/999.opus")]
+
+
+@pytest.mark.parametrize(
+    "novel,chapter,paragraph",
+    [
+        ("mistborn", "1", "0"),
+        ("the-eye-of-the-world", "1", "nope"),
+        ("the-eye-of-the-world", "1", "-1"),
+        ("the-eye-of-the-world", "1", "title.opus"),
+        ("the-eye-of-the-world", "1", "../0"),
+        ("the-eye-of-the-world", "0", "0"),
+        ("the-eye-of-the-world", "01", "0"),
+        ("audio/the-eye-of-the-world", "1", "0"),
+        (" the-eye-of-the-world", "1", "0"),
+    ],
+)
+def test_paragraph_request_rejects_other_novels_and_bad_indexes(
+    monkeypatch, novel, chapter, paragraph
+):
+    fake = _install(monkeypatch, {f"{EYE}/chapter_1/0.opus": b"OggS-should-not-be-read"})
+
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            get_student_audio_paragraph(
+                novel, chapter, paragraph, caller=_caller()
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert fake.calls == []
