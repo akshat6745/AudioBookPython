@@ -13,7 +13,7 @@ import warnings
 # Load .env FIRST before any app module that reads env vars at import time
 load_dotenv()
 
-from app.api import novels, tts, user, epub, download, download_v2
+from app.api import novels, tts, user, epub, download, download_v2, student_audio
 from app.core.settings import settings
 
 # Configure structlog
@@ -83,6 +83,7 @@ app.add_middleware(
         "https://audiobook-web.netlify.app",
         "http://localhost:3000",
         "http://localhost:5000",
+        "http://localhost:5001",
     ],
     allow_credentials=False,
     allow_methods=["*"],
@@ -103,6 +104,7 @@ app.include_router(user.router)
 app.include_router(download.router)
 app.include_router(download_v2.router)
 app.include_router(epub.router)
+app.include_router(student_audio.router)
 
 @app.get("/health", status_code=200)
 def health_check():

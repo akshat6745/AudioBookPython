@@ -1,0 +1,354 @@
+"""Read-only /student-audio allowlist.
+
+The player can call GET /student-audio/<r2-key> or
+GET /student-audio/paragraph?novel=&chapter=&paragraph=. These tests drive
+the handlers directly, with a fake R2 client, matching the other API tests
+in this repo.
+"""
+
+import asyncio
+import inspect
+
+import pytest
+from botocore.exceptions import ClientError
+from fastapi import HTTPException
+from starlette.routing import Match
+
+from app.api.deps import AuthenticatedUser, get_current_user
+from app.api.student_audio import (
+    STUDENT_AUDIO_PREFIX,
+    content_type_for_student_audio,
+    get_student_audio,
+    get_student_audio_paragraph,
+    student_audio_key_from_params,
+    validate_student_audio_key,
+)
+from app.main import app
+
+EYE = f"{STUDENT_AUDIO_PREFIX}the-eye-of-the-world"
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def _caller() -> AuthenticatedUser:
+    return AuthenticatedUser(id="user-1", username="user-1")
+
+
+def _dependency(function, parameter: str):
+    return inspect.signature(function).parameters[parameter].default.dependency
+
+
+class FakeBody:
+    def __init__(self, data: bytes):
+        self._data = data
+        self._offset = 0
+        self.closed = False
+
+    def read(self, amt=None):
+        if amt is None or amt < 0:
+            amt = len(self._data) - self._offset
+        chunk = self._data[self._offset:self._offset + amt]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self):
+        self.closed = True
+
+
+class FakeR2:
+    def __init__(self, objects: dict[str, bytes]):
+        self.objects = objects
+        self.calls: list[tuple] = []
+
+    def get_object(self, Bucket, Key):
+        self.calls.append(("get_object", Bucket, Key))
+        if Key not in self.objects:
+            raise ClientError(
+                {"Error": {"Code": "NoSuchKey", "Message": "Not Found"}},
+                "GetObject",
+            )
+        data = self.objects[Key]
+        return {"Body": FakeBody(data), "ContentLength": len(data), "ContentType": "binary/octet-stream"}
+
+    def put_object(self, **kwargs):
+        raise AssertionError("student audio endpoint must not write to R2")
+
+    def delete_object(self, **kwargs):
+        raise AssertionError("student audio endpoint must not delete from R2")
+
+
+def _install(monkeypatch, objects: dict[str, bytes]) -> FakeR2:
+    fake = FakeR2(objects)
+    monkeypatch.setattr("app.api.student_audio._r2_client", lambda: fake)
+    monkeypatch.setattr("app.api.student_audio._r2_bucket", lambda: "test-bucket")
+    return fake
+
+
+def _collect(response) -> bytes:
+    async def gather():
+        parts = []
+        async for chunk in response.body_iterator:
+            parts.append(chunk)
+        return b"".join(parts)
+
+    return _run(gather())
+
+
+def test_localhost_5001_can_call_the_api():
+    from fastapi.middleware.cors import CORSMiddleware
+
+    origins = [
+        origin
+        for middleware in app.user_middleware
+        if middleware.cls is CORSMiddleware
+        for origin in middleware.kwargs.get("allow_origins", [])
+    ]
+    assert "http://localhost:5001" in origins
+
+
+def test_route_is_mounted_and_requires_the_bearer_token():
+    paths = [getattr(route, "path", None) for route in app.routes]
+    assert "/student-audio/{object_key:path}" in paths
+    assert "/student-audio/paragraph" in paths
+    assert paths.index("/student-audio/paragraph") < paths.index(
+        "/student-audio/{object_key:path}"
+    )
+    for path, handler in (
+        ("/student-audio/{object_key:path}", get_student_audio),
+        ("/student-audio/paragraph", get_student_audio_paragraph),
+    ):
+        methods = next(
+            route.methods
+            for route in app.routes
+            if getattr(route, "path", None) == path
+        )
+        assert methods == {"GET"}
+        assert _dependency(handler, "caller") is get_current_user
+
+    scope = {"type": "http", "path": "/student-audio/paragraph", "method": "GET"}
+    matched = None
+    for route in app.routes:
+        match, _child = route.matches(scope)
+        if match == Match.FULL:
+            matched = route
+            break
+    assert getattr(matched, "path", None) == "/student-audio/paragraph"
+
+
+@pytest.mark.parametrize(
+    "filename,media_type,payload",
+    [
+        ("manifest.json", "application/json", b'{"title":{"file":"title.opus"}}'),
+        ("title.opus", "audio/ogg", b"OpusHead-title"),
+        ("5.opus", "audio/ogg", b"OpusHead-5"),
+        ("chapter.opus", "audio/ogg", b"OpusHead-chapter"),
+    ],
+)
+def test_allowlisted_key_streams_with_player_content_type(monkeypatch, filename, media_type, payload):
+    key = f"{EYE}/chapter_1/{filename}"
+    fake = _install(monkeypatch, {key: payload})
+
+    response = _run(get_student_audio(key, caller=_caller()))
+
+    assert response.status_code == 200
+    assert response.media_type == media_type
+    assert content_type_for_student_audio(key) == media_type
+    assert response.headers["content-length"] == str(len(payload))
+    assert response.headers["accept-ranges"] == "none"
+    assert (
+        response.headers["cache-control"]
+        == "no-store, no-cache, must-revalidate, max-age=0"
+    )
+    assert response.headers["pragma"] == "no-cache"
+    assert response.headers["expires"] == "0"
+    assert _collect(response) == payload
+    assert fake.calls == [("get_object", "test-bucket", key)]
+
+
+def test_missing_allowlisted_object_is_not_found(monkeypatch):
+    fake = _install(monkeypatch, {})
+    key = f"{EYE}/chapter_54/title.opus"
+
+    with pytest.raises(HTTPException) as exc:
+        _run(get_student_audio(key, caller=_caller()))
+
+    assert exc.value.status_code == 404
+    assert fake.calls == [("get_object", "test-bucket", key)]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "audio/the-eye-of-the-world/higgs_v3/chapter_1/title.opus",
+        "audio/the-eye-of-the-world/chapter_1/manifest.json",
+        "audio-student/other-novel/chapter_1/title.opus",
+        "audio-student/styletts2-eye-v1/Ghostwater/chapter_1/title.opus",
+        "audio-student/styletts2-eye-v1/ghost--water/chapter_1/title.opus",
+        "audio-student/styletts2-eye-v1/-ghostwater/chapter_1/title.opus",
+        "audio-student/styletts2-eye-v1/ghostwater/live-partial/chapter_1.json",
+        "audio-student/styletts2-eye-v1/the-eye-of-the-world/chapter_1/notes.txt",
+        "audio-student/styletts2-eye-v1-evil/the-eye-of-the-world/chapter_1/title.opus",
+        f"{EYE}/chapter_0/title.opus",
+        f"{EYE}/chapter_1/../chapter_2/title.opus",
+        "audio-student/styletts2-eye-v1/../../audio/secret.opus",
+        f"{EYE}/chapter_1/../../../audio/production.mp3",
+        "../audio/the-eye-of-the-world/chapter_1/title.opus",
+        "/audio/the-eye-of-the-world/chapter_1/title.opus",
+        f"{EYE}/chapter_1/title.opus\x00.mp3",
+        "audio-student\\styletts2-eye-v1\\the-eye-of-the-world\\chapter_1\\title.opus",
+        "https://evil.example/audio-student/styletts2-eye-v1/the-eye-of-the-world/chapter_1/title.opus",
+        f"{EYE}//chapter_1/title.opus",
+        f" {EYE}/chapter_1/title.opus",
+    ],
+)
+def test_rejected_prefixes_and_traversal_never_touch_r2(monkeypatch, key):
+    fake = _install(monkeypatch, {key: b"should-not-be-read"})
+
+    with pytest.raises(HTTPException) as exc:
+        validate_student_audio_key(key)
+    assert exc.value.status_code == 403
+
+    with pytest.raises(HTTPException) as endpoint_exc:
+        _run(get_student_audio(key, caller=_caller()))
+    assert endpoint_exc.value.status_code == 403
+    assert fake.calls == []
+
+
+def test_r2_failure_does_not_echo_the_client_error(monkeypatch):
+    class BrokenR2:
+        def get_object(self, Bucket, Key):
+            raise ClientError(
+                {"Error": {"Code": "AccessDenied", "Message": "secret-bucket-detail"}},
+                "GetObject",
+            )
+
+    monkeypatch.setattr("app.api.student_audio._r2_client", lambda: BrokenR2())
+    monkeypatch.setattr("app.api.student_audio._r2_bucket", lambda: "test-bucket")
+
+    with pytest.raises(HTTPException) as exc:
+        _run(get_student_audio(f"{EYE}/chapter_1/manifest.json", caller=_caller()))
+
+    assert exc.value.status_code == 502
+    assert "secret-bucket-detail" not in str(exc.value.detail)
+
+
+def test_paragraph_params_name_the_same_objects_as_the_path_route():
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "0")
+        == f"{EYE}/chapter_1/0.opus"
+    )
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "title")
+        == f"{EYE}/chapter_1/title.opus"
+    )
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "chapter")
+        == f"{EYE}/chapter_1/chapter.opus"
+    )
+    assert (
+        student_audio_key_from_params("the-eye-of-the-world", "1", "45")
+        == f"{EYE}/chapter_1/45.opus"
+    )
+
+
+@pytest.mark.parametrize(
+    "paragraph,filename,payload",
+    [
+        ("0", "0.opus", b"OggS-paragraph-0"),
+        ("title", "title.opus", b"OggS-title"),
+        ("chapter", "chapter.opus", b"OggS-chapter"),
+        ("45", "45.opus", b"OggS-paragraph-45"),
+    ],
+)
+def test_paragraph_request_streams_the_stored_opus_file(
+    monkeypatch, paragraph, filename, payload
+):
+    key = f"{EYE}/chapter_1/{filename}"
+    other = f"{EYE}/chapter_1/1.opus"
+    fake = _install(monkeypatch, {key: payload, other: b"OggS-not-this"})
+
+    response = _run(
+        get_student_audio_paragraph(
+            "the-eye-of-the-world",
+            "1",
+            paragraph,
+            caller=_caller(),
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.media_type == "audio/ogg"
+    assert response.headers["content-length"] == str(len(payload))
+    assert (
+        response.headers["cache-control"]
+        == "no-store, no-cache, must-revalidate, max-age=0"
+    )
+    assert _collect(response) == payload
+    assert fake.calls == [("get_object", "test-bucket", key)]
+
+
+def test_missing_paragraph_file_is_not_found(monkeypatch):
+    fake = _install(monkeypatch, {})
+
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            get_student_audio_paragraph(
+                "the-eye-of-the-world",
+                "1",
+                "999",
+                caller=_caller(),
+            )
+        )
+
+    assert exc.value.status_code == 404
+    assert fake.calls == [("get_object", "test-bucket", f"{EYE}/chapter_1/999.opus")]
+
+
+@pytest.mark.parametrize("novel", ["ghostwater", "mistborn", "the-shining"])
+def test_any_novel_slug_reads_the_same_layout(monkeypatch, novel):
+    key = f"{STUDENT_AUDIO_PREFIX}{novel}/chapter_5/manifest.json"
+    fake = _install(monkeypatch, {key: b"{}"})
+
+    assert validate_student_audio_key(key) == key
+    assert (
+        student_audio_key_from_params(novel, "5", "3")
+        == f"{STUDENT_AUDIO_PREFIX}{novel}/chapter_5/3.opus"
+    )
+    response = _run(get_student_audio(key, caller=_caller()))
+    assert response.media_type == "application/json"
+    assert _collect(response) == b"{}"
+    assert fake.calls == [("get_object", "test-bucket", key)]
+
+
+@pytest.mark.parametrize(
+    "novel,chapter,paragraph",
+    [
+        ("Ghostwater", "1", "0"),
+        ("ghost/water", "1", "0"),
+        ("ghostwater-", "1", "0"),
+        ("the-eye-of-the-world", "1", "nope"),
+        ("the-eye-of-the-world", "1", "-1"),
+        ("the-eye-of-the-world", "1", "title.opus"),
+        ("the-eye-of-the-world", "1", "../0"),
+        ("the-eye-of-the-world", "0", "0"),
+        ("the-eye-of-the-world", "01", "0"),
+        ("audio/the-eye-of-the-world", "1", "0"),
+        (" the-eye-of-the-world", "1", "0"),
+    ],
+)
+def test_paragraph_request_rejects_bad_slugs_and_bad_indexes(
+    monkeypatch, novel, chapter, paragraph
+):
+    fake = _install(monkeypatch, {f"{EYE}/chapter_1/0.opus": b"OggS-should-not-be-read"})
+
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            get_student_audio_paragraph(
+                novel, chapter, paragraph, caller=_caller()
+            )
+        )
+
+    assert exc.value.status_code == 403
+    assert fake.calls == []
