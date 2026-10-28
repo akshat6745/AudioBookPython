@@ -64,7 +64,7 @@ async def _get_user(username: str) -> Optional[dict]:
     d1 = get_d1_client()
     rows = await d1.query(
         "SELECT id, username, password, google_sub, auth_provider "
-        "FROM users WHERE username = ?",
+        "FROM users WHERE username = ? COLLATE NOCASE",
         [username],
     )
     return rows[0] if rows else None
