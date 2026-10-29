@@ -146,10 +146,11 @@ class Speaker:
 
 
 def _load_models(device: str):
+    from .bootstrap import cache_dir
     from .style_plan import StyleBank
     from .tts_engine import BatchStudent
 
-    cache = Path.home() / ".cache" / "audiobook-worker" / layout.STYLETTS_RUNTIME / layout.STYLETTS_VERSION
+    cache = cache_dir() / layout.STYLETTS_RUNTIME / layout.STYLETTS_VERSION
     override = __import__("os").environ.get("AUDIOBOOK_STYLETTS_ROOT")
     root = Path(override) if override else cache
     student = BatchStudent(

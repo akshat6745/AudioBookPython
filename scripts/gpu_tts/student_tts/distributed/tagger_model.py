@@ -16,7 +16,9 @@ def runtime_dir() -> Path:
     override = os.environ.get("AUDIOBOOK_TAGGER_ROOT")
     if override:
         return Path(override)
-    return Path.home() / ".cache" / "audiobook-worker" / "emotion-tagger-v1" / TAGGER_VERSION
+    from .bootstrap import cache_dir
+
+    return cache_dir() / "emotion-tagger-v1" / TAGGER_VERSION
 
 
 def _autocast(device):
