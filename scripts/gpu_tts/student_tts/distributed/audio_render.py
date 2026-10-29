@@ -167,7 +167,46 @@ def _load_models(device: str):
 _MODELS = None
 
 
-def render_and_publish(store, source, chapter, *, batch, device, worker_id, profile_file, token_budget, log, claim=None, now_fn=None, replace_stale: bool = False) -> None:
+def render_and_publish(store, source, chapter, *, batch, device, worker_id, profile_file, token_budget, log, claim=None, now_fn=None, replace_stale: bool = False):
+    prepared = _render_chapter(
+        store,
+        source,
+        chapter,
+        batch=batch,
+        device=device,
+        worker_id=worker_id,
+        profile_file=profile_file,
+        token_budget=token_budget,
+        log=log,
+        claim=claim,
+        now_fn=now_fn,
+        replace_stale=replace_stale,
+    )
+    if prepared is None:
+        return None
+    prepared()
+    return None
+
+
+def render_and_defer_publish(store, source, chapter, *, batch, device, worker_id, profile_file, token_budget, log, claim=None, now_fn=None, replace_stale: bool = False):
+    """Run GPU synthesis on the caller thread and return a callable that encodes + uploads in the background."""
+    return _render_chapter(
+        store,
+        source,
+        chapter,
+        batch=batch,
+        device=device,
+        worker_id=worker_id,
+        profile_file=profile_file,
+        token_budget=token_budget,
+        log=log,
+        claim=claim,
+        now_fn=now_fn,
+        replace_stale=replace_stale,
+    )
+
+
+def _render_chapter(store, source, chapter, *, batch, device, worker_id, profile_file, token_budget, log, claim=None, now_fn=None, replace_stale: bool = False):
     tag_row = classify_tag(store, source, chapter, now=0 if now_fn is None else now_fn())
     audio_row = classify_audio(store, source, chapter, now=0 if now_fn is None else now_fn(), tag_row=tag_row)
     overwrite = bool(replace_stale and audio_row["status"] in {"stale", "legacy_valid"})
@@ -183,10 +222,10 @@ def render_and_publish(store, source, chapter, *, batch, device, worker_id, prof
         log(f"chapter {chapter} legacy audio is being replaced with {layout.VOICE_BANK}; writing {dest}")
     elif audio_row["status"] in {"valid", "legacy_valid"}:
         log(f"chapter {chapter} audio already valid")
-        return
+        return None
     if not overwrite and recover_if_elected(store, dest):
         log(f"chapter {chapter} finished from an elected audio attempt")
-        return
+        return None
     spec = next(item for item in source["chapters"] if int(item["chapter"]) == int(chapter))
     text = store.get_bytes(spec["key"]).decode()
     if sha256_text(text) != spec["sha256"]:
@@ -207,7 +246,7 @@ def render_and_publish(store, source, chapter, *, batch, device, worker_id, prof
     def attempt(width: int):
         if claim is not None and now_fn is not None and not claim.heartbeat(now_fn()):
             raise RuntimeError(f"lost the audio lease for chapter {chapter}")
-        return _generate(student, bank, source["slug"], chapter, title, paragraphs, tags, width, effective_budget)
+        return _synthesize_chapter(student, bank, source["slug"], chapter, title, paragraphs, tags, width, effective_budget)
 
     def on_reduce(width, _exc):
         log(f"chapter {chapter} audio batch reduced to {width} after OOM")
@@ -216,33 +255,51 @@ def render_and_publish(store, source, chapter, *, batch, device, worker_id, prof
         empty_cache(device)
 
     t_chapter_start = time.perf_counter()
-    (manifest, files, _width, timings), effective, _tried = call_reducing(batch, attempt, on_reduce=on_reduce)
-    manifest["source_sha256"] = spec["sha256"]
-    manifest["tag_manifest_sha256"] = tag_row.get("manifest_sha256")
-    manifest["tagger_version"] = layout.TAGGER_MODEL
-    manifest["batch_requested"] = batch
-    manifest["batch_effective"] = effective
-    manifest["worker_id"] = worker_id
-    t_upload_start = time.perf_counter()
-    publish_chapter_audio(
-        store, slug=source["slug"], chapter=chapter, dest_prefix=dest, files=files,
-        manifest=manifest, attempt_id=uuid.uuid4().hex, overwrite=overwrite,
-    )
-    upload_s = max(0.001, time.perf_counter() - t_upload_start)
-    total_s = max(0.001, time.perf_counter() - t_chapter_start)
-    audio_s = float(timings["audio_s"])
-    synth_s = max(0.001, float(timings["synth_s"]))
-    encode_s = float(timings["encode_s"])
-    synth_rt = audio_s / synth_s
-    total_rt = audio_s / total_s
+    synth_data, effective, _tried = call_reducing(batch, attempt, on_reduce=on_reduce)
     save_effective("audio", device, f"{layout.STYLETTS_RUNTIME}@{layout.STYLETTS_VERSION}", effective, profile_file)
+    audio_s = float(synth_data["audio_s"])
+    synth_s = max(0.001, float(synth_data["synth_s"]))
     log(
-        f"chapter {chapter} audio published batch={effective} files={len(files)} | "
+        f"chapter {chapter} GPU synthesis done batch={effective} | "
         f"audio={audio_s / 60:.1f}m ({audio_s:.0f}s) | "
-        f"gen={synth_s:.1f}s ({synth_rt:.2f}x realtime) | "
-        f"encode={encode_s:.1f}s upload={upload_s:.1f}s | "
-        f"total={total_s:.1f}s ({total_rt:.2f}x realtime)"
+        f"gen={synth_s:.1f}s ({audio_s / synth_s:.2f}x realtime) -> encoding & uploading in background"
     )
+
+    def finalize() -> None:
+        manifest, files, encode_s = _encode_chapter(
+            bank=bank,
+            slug=source["slug"],
+            chapter=chapter,
+            title=title,
+            paragraphs=paragraphs,
+            tags=tags,
+            plans=synth_data["plans"],
+            clips=synth_data["clips"],
+        )
+        manifest["source_sha256"] = spec["sha256"]
+        manifest["tag_manifest_sha256"] = tag_row.get("manifest_sha256")
+        manifest["tagger_version"] = layout.TAGGER_MODEL
+        manifest["batch_requested"] = batch
+        manifest["batch_effective"] = effective
+        manifest["worker_id"] = worker_id
+        t_upload_start = time.perf_counter()
+        publish_chapter_audio(
+            store, slug=source["slug"], chapter=chapter, dest_prefix=dest, files=files,
+            manifest=manifest, attempt_id=uuid.uuid4().hex, overwrite=overwrite,
+        )
+        upload_s = max(0.001, time.perf_counter() - t_upload_start)
+        total_s = max(0.001, time.perf_counter() - t_chapter_start)
+        synth_rt = audio_s / synth_s
+        total_rt = audio_s / total_s
+        log(
+            f"chapter {chapter} audio published batch={effective} files={len(files)} | "
+            f"audio={audio_s / 60:.1f}m ({audio_s:.0f}s) | "
+            f"gen={synth_s:.1f}s ({synth_rt:.2f}x realtime) | "
+            f"encode={encode_s:.1f}s upload={upload_s:.1f}s | "
+            f"total={total_s:.1f}s ({total_rt:.2f}x realtime)"
+        )
+
+    return finalize
 
 
 def _tag_blob(store, source, chapter: int) -> str:
@@ -254,7 +311,7 @@ def _tag_blob(store, source, chapter: int) -> str:
     return manifest["jsonl_key"]
 
 
-def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, token_budget) -> tuple[dict, dict[str, bytes], int, dict]:
+def _synthesize_chapter(student, bank, slug, chapter, title, paragraphs, tags, batch, token_budget) -> dict:
     t_synth_start = time.perf_counter()
     speaker = Speaker(student, bank, batch, token_budget)
     postfx = _postfx()
@@ -271,6 +328,16 @@ def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, toke
         cursor += len(group)
     student.sync()
     synth_s = time.perf_counter() - t_synth_start
+    total_samples = sum(len(clip[0]) for clip in clips)
+    return {
+        "plans": plans,
+        "clips": clips,
+        "synth_s": round(synth_s, 2),
+        "audio_s": round(total_samples / layout.SAMPLE_RATE, 3),
+    }
+
+
+def _encode_chapter(*, bank, slug, chapter, title, paragraphs, tags, plans, clips) -> tuple[dict, dict[str, bytes], float]:
     t_encode_start = time.perf_counter()
     work = Path(__import__("tempfile").mkdtemp(prefix=f"audiobook-ch{chapter}-"))
     try:
@@ -331,15 +398,28 @@ def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, toke
         # title bytes were set above inside the loop only for entries. Set title explicitly.
         manifest["title"]["bytes"] = len(files["title.opus"])
         manifest["title"]["sha256"] = hashlib.sha256(files["title.opus"]).hexdigest()
-        encode_s = time.perf_counter() - t_encode_start
-        audio_s = round(len(audio) / layout.SAMPLE_RATE, 3)
-        timings = {
-            "audio_s": audio_s,
-            "synth_s": round(synth_s, 2),
-            "encode_s": round(encode_s, 2),
-            "x_realtime_synth": round(audio_s / max(0.001, synth_s), 2),
-        }
-        return manifest, files, batch, timings
+        encode_s = round(time.perf_counter() - t_encode_start, 2)
+        return manifest, files, encode_s
     finally:
         shutil.rmtree(work, ignore_errors=True)
-        student.sync()
+
+
+def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, token_budget) -> tuple[dict, dict[str, bytes], int, dict]:
+    synth_data = _synthesize_chapter(student, bank, slug, chapter, title, paragraphs, tags, batch, token_budget)
+    manifest, files, encode_s = _encode_chapter(
+        bank=bank,
+        slug=slug,
+        chapter=chapter,
+        title=title,
+        paragraphs=paragraphs,
+        tags=tags,
+        plans=synth_data["plans"],
+        clips=synth_data["clips"],
+    )
+    timings = {
+        "audio_s": synth_data["audio_s"],
+        "synth_s": synth_data["synth_s"],
+        "encode_s": encode_s,
+        "x_realtime_synth": round(synth_data["audio_s"] / max(0.001, synth_data["synth_s"]), 2),
+    }
+    return manifest, files, batch, timings

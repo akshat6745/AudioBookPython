@@ -480,6 +480,59 @@ def test_audio_refuses_partial_tags_and_skips_legacy(tmp_path):
     assert recorder.calls == 1
 
 
+def test_background_audio_publish_pipeline_overlaps_next_chapter(tmp_path):
+    store = FakeStore()
+    book = write_book(tmp_path, {1: "Chapter one.", 2: "Chapter two."})
+    publish_novel_tree(store, name="The Eye of the World", slug="the-eye-of-the-world", source_dir=book, chapters=[1, 2])
+    tagger = FakeTagger()
+    assert execute(args(tmp_path, stage="tag", batch_size=16), store, tagger=tagger, inline=True) == EXIT_OK
+
+    events = []
+    ch1_encode_gate = threading.Event()
+    ch2_synth_started = threading.Event()
+
+    class PipelinedRenderer:
+        def render_and_defer_publish(self, store, source, chapter, **kwargs):
+            events.append(("synth", chapter))
+            if chapter == 2:
+                ch2_synth_started.set()
+
+            def finalize():
+                if chapter == 1:
+                    # Wait until chapter 2 has already started GPU synthesis!
+                    assert ch2_synth_started.wait(timeout=5.0)
+                    ch1_encode_gate.set()
+                events.append(("publish", chapter))
+                prefix = layout.audio_prefix(source["slug"], chapter)
+                blob = b"OggS-fake"
+                digest = sha256_bytes(blob)
+                tag_man_sha = sha256_bytes(store.get_bytes(layout.tag_manifest_key(source["slug"], chapter)))
+                spec = next(item for item in source["chapters"] if int(item["chapter"]) == int(chapter))
+                publish_chapter_audio(
+                    store,
+                    slug=source["slug"],
+                    chapter=chapter,
+                    dest_prefix=prefix,
+                    files={"title.opus": blob, "0.opus": blob, "chapter.opus": blob},
+                    manifest={
+                        "novel": source["slug"],
+                        "chapter": chapter,
+                        "source_sha256": spec["sha256"],
+                        "tag_manifest_sha256": tag_man_sha,
+                        "title": {"file": "title.opus", "bytes": len(blob), "sha256": digest},
+                        "paragraphs": [{"file": "0.opus", "bytes": len(blob), "sha256": digest}],
+                        "chapter_file": {"file": "chapter.opus", "bytes": len(blob), "sha256": digest},
+                    },
+                    attempt_id=f"pipe-{chapter}",
+                )
+
+            return finalize
+
+    assert execute(args(tmp_path, stage="audio", validate=True), store, renderer=PipelinedRenderer(), inline=True) == EXIT_OK
+    assert ch1_encode_gate.is_set()
+    assert events.index(("synth", 2)) < events.index(("publish", 1))
+
+
 def test_validation_hash_mismatch_and_publish_order(tmp_path):
     store = FakeStore()
     book = write_book(tmp_path, {1: "Hello."})
