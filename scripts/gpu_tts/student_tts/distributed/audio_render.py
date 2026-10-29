@@ -79,7 +79,15 @@ class Speaker:
 
     def jobs_for(self, chunks: list[dict], key: tuple) -> list[dict]:
         jobs = []
+        ip = getattr(self.bank, "inference_params", {}) or {}
         for index, chunk in enumerate(chunks):
+            is_nar = chunk["voice"] == "narrator"
+            alpha = float(ip.get("alpha", layout.NARRATOR_ALPHA)) if is_nar else layout.DIALOGUE_ALPHA
+            beta = float(ip.get("beta", layout.NARRATOR_BETA)) if is_nar else layout.DIALOGUE_BETA
+            esc = float(ip.get("embedding_scale", layout.NARRATOR_EMBEDDING_SCALE)) if is_nar else layout.DIALOGUE_EMBEDDING_SCALE
+            f0_sc = float(ip.get("f0_scale", ip.get("f0_mult", layout.NARRATOR_F0_SCALE))) if is_nar else layout.DIALOGUE_F0_SCALE
+            spd = float(ip.get("speed", ip.get("length_scale", 1.0))) if is_nar else 1.0
+            t_db = float(ip.get("narrator_target_db", layout.NARRATOR_TARGET_DB)) if is_nar else float(ip.get("dialogue_target_db", layout.DIALOGUE_TARGET_DB))
             entry = self.bank.pick(chunk["voice"], chunk["emotion"], *key)
             tokens = self.student.tokens(chunk["text"])
             parts = [(chunk["text"], tokens)]
@@ -89,7 +97,8 @@ class Speaker:
                 seed = seed_for(*key, index) if part == 0 else seed_for(*key, index, part)
                 jobs.append({
                     "chunk": index, "part": part, "parts": len(parts), "text": text,
-                    "tokens": toks, "entry": entry, "seed": seed,
+                    "voice": chunk["voice"], "alpha": alpha, "beta": beta, "embedding_scale": esc,
+                    "f0_scale": f0_sc, "speed": spd, "target_db": t_db, "tokens": toks, "entry": entry, "seed": seed,
                 })
         return jobs
 
@@ -103,6 +112,11 @@ class Speaker:
             ref = torch.cat([self.student.bank_style(self.bank.vectors, jobs[index]["entry"]["index"]) for index in group])
             audios = self.student.infer_batch(
                 [jobs[index]["tokens"] for index in group], ref, [jobs[index]["seed"] for index in group],
+                alphas=[jobs[index]["alpha"] for index in group],
+                betas=[jobs[index]["beta"] for index in group],
+                embedding_scales=[jobs[index]["embedding_scale"] for index in group],
+                f0_scales=[jobs[index]["f0_scale"] for index in group],
+                speeds=[jobs[index].get("speed", 1.0) for index in group],
             )
             for index, audio in zip(group, audios):
                 out[index] = postfx.tidy(audio, layout.SAMPLE_RATE)[0]
@@ -118,7 +132,13 @@ class Speaker:
                     "voice": chunk["voice"], "emotion": chunk["emotion"], "style_index": entry["index"],
                     "fallback": entry["fallback"], **({"split_parts": job["parts"]} if job["parts"] > 1 else {}),
                 })
-            pieces += [postfx.match_level(audio, layout.SAMPLE_RATE), np.zeros(int(layout.SAMPLE_RATE * CHUNK_GAP_S), np.float32)]
+            t_db = job.get("target_db", layout.NARRATOR_TARGET_DB if chunks[job["chunk"]]["voice"] == "narrator" else layout.DIALOGUE_TARGET_DB)
+            leveled = postfx.match_level(audio, layout.SAMPLE_RATE, target_db=t_db)
+            if t_db > -20.0:
+                peak = float(np.abs(leveled).max())
+                if peak > 0.88:
+                    leveled = (0.88 * np.tanh(leveled / 0.88)).astype(np.float32)
+            pieces += [leveled, np.zeros(int(layout.SAMPLE_RATE * CHUNK_GAP_S), np.float32)]
         if not pieces:
             return np.zeros(int(layout.SAMPLE_RATE * silence_s), np.float32), styles
         pieces[-1] = np.zeros(int(layout.SAMPLE_RATE * PARA_GAP_S), np.float32)
@@ -145,16 +165,24 @@ def _load_models(device: str):
 _MODELS = None
 
 
-def render_and_publish(store, source, chapter, *, batch, device, worker_id, profile_file, token_budget, log, claim=None, now_fn=None) -> None:
+def render_and_publish(store, source, chapter, *, batch, device, worker_id, profile_file, token_budget, log, claim=None, now_fn=None, replace_stale: bool = False) -> None:
     tag_row = classify_tag(store, source, chapter, now=0 if now_fn is None else now_fn())
     audio_row = classify_audio(store, source, chapter, now=0 if now_fn is None else now_fn(), tag_row=tag_row)
-    dest = destination_for(audio_row["status"] if audio_row["status"] == "stale" else "missing", source["slug"], chapter)
+    overwrite = bool(replace_stale and audio_row["status"] in {"stale", "legacy_valid"})
+    dest = destination_for(
+        audio_row["status"] if audio_row["status"] == "stale" else "missing",
+        source["slug"],
+        chapter,
+        replace_stale=replace_stale,
+    )
     if audio_row["status"] == "stale":
         log(f"chapter {chapter} canonical audio is stale; writing {dest}")
+    elif audio_row["status"] == "legacy_valid" and replace_stale:
+        log(f"chapter {chapter} legacy audio is being replaced with {layout.VOICE_BANK}; writing {dest}")
     elif audio_row["status"] in {"valid", "legacy_valid"}:
         log(f"chapter {chapter} audio already valid")
         return
-    if recover_if_elected(store, dest):
+    if not overwrite and recover_if_elected(store, dest):
         log(f"chapter {chapter} finished from an elected audio attempt")
         return
     spec = next(item for item in source["chapters"] if int(item["chapter"]) == int(chapter))
@@ -193,7 +221,7 @@ def render_and_publish(store, source, chapter, *, batch, device, worker_id, prof
     manifest["worker_id"] = worker_id
     publish_chapter_audio(
         store, slug=source["slug"], chapter=chapter, dest_prefix=dest, files=files,
-        manifest=manifest, attempt_id=uuid.uuid4().hex,
+        manifest=manifest, attempt_id=uuid.uuid4().hex, overwrite=overwrite,
     )
     save_effective("audio", device, f"{layout.STYLETTS_RUNTIME}@{layout.STYLETTS_VERSION}", effective, profile_file)
     log(f"chapter {chapter} audio published batch={effective} files={len(files)}")
@@ -258,8 +286,11 @@ def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, toke
             if entry["file"] != "chapter.opus":
                 entry.update(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
         chapter_raw = files["chapter.opus"]
+        ip = getattr(bank, "inference_params", {}) or {}
+        voice_bank = str(ip.get("slug") or getattr(layout, "VOICE_BANK", "kokoro_af_heart_d018"))
         manifest = {
             "novel": slug, "chapter": chapter, "tts": "styletts2-student-eye-v1", "variant": "student",
+            "voice_bank": voice_bank,
             "sample_rate": layout.SAMPLE_RATE,
             "title": {"text": title, "app_index": 0, "file": "title.opus", "duration_s": round(len(title_clip) / layout.SAMPLE_RATE, 3),
                       "bytes": len(files["title.opus"]), "sha256": hashlib.sha256(files["title.opus"]).hexdigest()},

@@ -23,8 +23,8 @@ from .layout import (
 from .store import ConflictError, PreconditionFailed
 
 
-def destination_for(status: str, slug: str, chapter: int) -> str:
-    if status == "stale":
+def destination_for(status: str, slug: str, chapter: int, *, replace_stale: bool = False) -> str:
+    if status == "stale" and not replace_stale:
         return audio_prefix(slug, chapter, versioned=True)
     return audio_prefix(slug, chapter)
 
@@ -33,7 +33,17 @@ def _manifest_bytes(manifest: dict) -> bytes:
     return (json.dumps(manifest, indent=1, sort_keys=True, ensure_ascii=False) + "\n").encode()
 
 
-def publish_chapter_audio(store, *, slug: str, chapter: int, dest_prefix: str, files: dict[str, bytes], manifest: dict, attempt_id: str) -> str:
+def publish_chapter_audio(
+    store,
+    *,
+    slug: str,
+    chapter: int,
+    dest_prefix: str,
+    files: dict[str, bytes],
+    manifest: dict,
+    attempt_id: str,
+    overwrite: bool = False,
+) -> str:
     """``files`` maps the final object name (title.opus, 0.opus, chapter.opus) to bytes."""
     if not dest_prefix.endswith("/"):
         raise ValueError("audio prefix must end with /")
@@ -51,6 +61,7 @@ def publish_chapter_audio(store, *, slug: str, chapter: int, dest_prefix: str, f
     manifest["runtime_version"] = STYLETTS_VERSION
     manifest["checkpoint_sha256"] = VERIFIED_CHECKPOINT["sha256"]
     manifest["style_bank_sha256"] = KNOWN_SHA256["style_bank/bank.npz"]
+    manifest["voice_bank"] = manifest.get("voice_bank") or getattr(__import__("scripts.gpu_tts.student_tts.distributed.layout", fromlist=["VOICE_BANK"]), "VOICE_BANK", "kokoro_af_heart_d018")
     manifest["tagger_version"] = manifest.get("tagger_version") or TAGGER_MODEL
     manifest["prefix"] = dest_prefix.rstrip("/")
     manifest_body = _manifest_bytes(manifest)
@@ -64,21 +75,27 @@ def publish_chapter_audio(store, *, slug: str, chapter: int, dest_prefix: str, f
     }
     plan_key = dest_prefix + "publish.json"
     plan_body = (json.dumps(plan, sort_keys=True) + "\n").encode()
-    try:
-        store.put_bytes(plan_key, plan_body, content_type="application/json", if_none_match="*")
-    except PreconditionFailed:
-        existing = json.loads(store.get_bytes(plan_key).decode())
-        if existing.get("files") != plan["files"]:
-            raise ConflictError(
-                f"chapter {chapter} already has a different audio publish election; not overwriting"
-            )
-        plan = existing
-        attempt = existing["attempt_prefix"]
+    if overwrite:
+        store.put_bytes(plan_key, plan_body, content_type="application/json")
+    else:
+        try:
+            store.put_bytes(plan_key, plan_body, content_type="application/json", if_none_match="*")
+        except PreconditionFailed:
+            existing = json.loads(store.get_bytes(plan_key).decode())
+            if existing.get("files") != plan["files"]:
+                raise ConflictError(
+                    f"chapter {chapter} already has a different audio publish election; not overwriting"
+                )
+            plan = existing
+            attempt = existing["attempt_prefix"]
     for name, meta in plan["files"].items():
         body = store.get_bytes(attempt + name)
         if len(body) != meta["bytes"] or sha256_bytes(body) != meta["sha256"]:
             raise ConflictError(f"attempt object {name} does not match the publish election")
         final_key = dest_prefix + name
+        if overwrite:
+            store.put_bytes(final_key, body, content_type="audio/ogg")
+            continue
         head = store.head(final_key)
         if head is None:
             try:
@@ -97,13 +114,16 @@ def publish_chapter_audio(store, *, slug: str, chapter: int, dest_prefix: str, f
     if sha256_bytes(body) != plan.get("manifest_sha256", sha256_bytes(body)):
         raise ConflictError(f"attempt manifest does not match the publish election for chapter {chapter}")
     man_key = dest_prefix + "manifest.json"
-    head = store.head(man_key)
-    if head is None:
-        store.put_bytes(man_key, body, content_type="application/json", if_none_match="*")
+    if overwrite:
+        store.put_bytes(man_key, body, content_type="application/json")
     else:
-        remote = store.get_bytes(man_key)
-        if sha256_bytes(remote) != sha256_bytes(body):
-            raise ConflictError(f"audio manifest already exists and differs for chapter {chapter}")
+        head = store.head(man_key)
+        if head is None:
+            store.put_bytes(man_key, body, content_type="application/json", if_none_match="*")
+        else:
+            remote = store.get_bytes(man_key)
+            if sha256_bytes(remote) != sha256_bytes(body):
+                raise ConflictError(f"audio manifest already exists and differs for chapter {chapter}")
     written = store.get_bytes(man_key)
     if sha256_bytes(written) != sha256_bytes(body):
         raise ConflictError(f"audio manifest verification failed for chapter {chapter}")

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_SETUP, EXIT_UNEXPECTED
 
-COMMANDS = ("run", "validate", "status", "setup", "publish-runtime", "publish-novel")
+COMMANDS = ("run", "validate", "status", "setup", "publish-runtime", "publish-novel", "list")
 HELP_FLAGS = {"-h", "--help"}
 
 
@@ -30,6 +30,7 @@ def _add_noninteractive(cmd: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="audiobook-worker")
     parser.add_argument("--novel", help="registered novel title, used when no subcommand is given")
+    parser.add_argument("--list", action="store_true", help="list registered novels on R2 and exit")
     _add_noninteractive(parser)
     sub = parser.add_subparsers(dest="command")
 
@@ -52,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--status", action="store_true", help="validate only; do not tag or render")
     run.add_argument("--allow-partial-tags", action="store_true",
                      help="audio stage renders chapters that already have valid tags. Default is to stop if any requested chapter is untagged.")
+    run.add_argument("--replace-stale", action="store_true",
+                     help="replace chapters from an older voice bank in place under chapter_<n>/ so the player uses the new voice.")
     run.add_argument("--reset-batch-profile", action="store_true")
 
     validate = sub.add_parser("validate", help="check R2 manifests and payloads; do not generate")
@@ -61,6 +64,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     setup = sub.add_parser("setup", help="create the local cache: StyleTTS2 commit, patch, artifact download")
     _add_noninteractive(setup)
+
+    list_cmd = sub.add_parser("list", help="list registered novels on R2")
+    _add_noninteractive(list_cmd)
 
     pub_rt = sub.add_parser("publish-runtime", help="upload versioned private runtime artifacts")
     _add_noninteractive(pub_rt)
@@ -102,7 +108,7 @@ def _prepare_argv(argv: list[str]) -> list[str]:
         if noninteractive:
             return [argv[0], "--non-interactive", *argv[1:]]
         return argv
-    if argv[0].startswith("--"):
+    if argv[0].startswith("--") and argv[0] != "--list":
         head = ["run", "--non-interactive"] if noninteractive else ["run"]
         return [*head, *argv]
     if noninteractive:
@@ -124,8 +130,10 @@ def _status_from_exit(exc: SystemExit) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     argv = _prepare_argv(list(sys.argv[1:] if argv is None else argv))
     args = build_parser().parse_args(argv)
+    if getattr(args, "list", False):
+        args.command = "list"
     if args.command is None:
-        raise SystemExit("choose run, validate, status, setup, publish-runtime, or publish-novel")
+        raise SystemExit("choose run, validate, status, setup, list, publish-runtime, or publish-novel")
     if args.command == "status":
         args.command = "validate"
     stage = getattr(args, "stage", None)
@@ -144,6 +152,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.audio_batch_size = None
         args.validate = False
         args.allow_partial_tags = False
+        args.replace_stale = False
         args.reset_batch_profile = False
     if not hasattr(args, "report_json"):
         args.report_json = None
@@ -179,6 +188,15 @@ def main(argv: list[str] | None = None, store=None) -> int:
         from .bootstrap import setup
 
         setup(store)
+        return 0
+    if args.command == "list":
+        from .registry import load_index
+
+        index = load_index(store)
+        novels = index.get("novels") or []
+        for item in novels:
+            chapters = item.get("chapters") or []
+            print(f"{item['slug']:48}  ({len(chapters):4d} ch)  {item['name']}")
         return 0
     if args.command == "publish-runtime":
         from .publish import publish_runtime

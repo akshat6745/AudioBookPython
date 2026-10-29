@@ -22,7 +22,10 @@ def _load_stack():
 
 def preflight_tags(store, source, chapters, *, now: float, allow_partial: bool) -> tuple[int | None, list[dict], str]:
     """Return (exit code or None, tag rows, summary). None means tagging is sufficient to continue."""
-    rows = [classify_tag(store, source, chapter, now=now) for chapter in chapters]
+    from .validate import _pool_map
+
+    workers = 16 if store.__class__.__name__ == "BotoStore" else 1
+    rows = _pool_map(workers, lambda chapter: classify_tag(store, source, chapter, now=now), chapters)
     bad = [row for row in rows if row["status"] not in VALID_TAG]
     if not bad:
         return None, rows, ""
@@ -44,28 +47,37 @@ def _tag_summary(rows: list[dict]) -> str:
     )
 
 
-def chapters_to_render(store, source, chapters, tag_rows, *, now: float, allow_partial: bool) -> tuple[list[int], list[dict]]:
+def chapters_to_render(store, source, chapters, tag_rows, *, now: float, allow_partial: bool, replace_stale: bool = False) -> tuple[list[int], list[dict]]:
+    from .validate import _pool_map
+
     by_chapter = {int(row["chapter"]): row for row in tag_rows}
-    audio_rows = []
     work = []
-    for chapter in chapters:
+    ready = {"valid"} if replace_stale else AUDIO_READY
+    redo = REDO | ({"legacy_valid"} if replace_stale else set())
+    workers = 16 if store.__class__.__name__ == "BotoStore" else 1
+    audio_rows = _pool_map(
+        workers,
+        lambda chapter: classify_audio(store, source, chapter, now=now, tag_row=by_chapter[chapter]),
+        chapters,
+    )
+    for chapter, audio_row in zip(chapters, audio_rows):
         tag_row = by_chapter[chapter]
-        audio_row = classify_audio(store, source, chapter, now=now, tag_row=tag_row)
-        audio_rows.append(audio_row)
-        if audio_row["status"] in AUDIO_READY:
+        if audio_row["status"] in ready:
             continue
         if tag_row["status"] not in VALID_TAG:
             if allow_partial:
                 continue
             continue
-        if audio_row["status"] in REDO:
+        if audio_row["status"] in redo:
             work.append(chapter)
     return work, audio_rows
 
 
-def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: str, now_fn, log, renderer=None, profile_file=None, ttl: float | None = None, token_budget: int = layout.BATCH_TOKENS) -> int:
+def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: str, now_fn, log, renderer=None, profile_file=None, ttl: float | None = None, token_budget: int = layout.BATCH_TOKENS, replace_stale: bool = False) -> int:
     owner = identity["owner"]
     codes = []
+    ready = {"valid"} if replace_stale else AUDIO_READY
+    redo = REDO | ({"legacy_valid"} if replace_stale else set())
     while True:
         claimed = None
         target = None
@@ -75,12 +87,12 @@ def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: 
             if tag_row["status"] not in VALID_TAG:
                 continue
             audio_row = classify_audio(store, source, chapter, now=now, tag_row=tag_row)
-            if audio_row["status"] in AUDIO_READY:
+            if audio_row["status"] in ready:
                 continue
             if audio_row["status"] in BLOCKED:
                 codes.append(EXIT_INVALID)
                 continue
-            if audio_row["status"] not in REDO:
+            if audio_row["status"] not in redo:
                 continue
             kwargs = dict(
                 store=store, slug=source["slug"], stage="audio", chapter=chapter, owner=owner,
@@ -93,7 +105,7 @@ def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: 
             if claimed is None:
                 continue
             again = classify_audio(store, source, chapter, now=now_fn(), tag_row=tag_row)
-            if again["status"] not in REDO:
+            if again["status"] not in redo:
                 claimed.release(now_fn())
                 claimed = None
                 continue
@@ -108,9 +120,14 @@ def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: 
             with Heartbeat(claimed, now_fn):
                 if renderer is None:
                     renderer = _load_stack()
-                renderer.render_and_publish(
-                    store, source, target, batch=batch, device=device, worker_id=identity["worker_id"],
+                r_kwargs = dict(
+                     batch=batch, device=device, worker_id=identity["worker_id"],
                     profile_file=profile_file, token_budget=token_budget, log=log, claim=claimed, now_fn=now_fn,
+                )
+                if replace_stale:
+                    r_kwargs["replace_stale"] = True
+                renderer.render_and_publish(
+                    store, source, target, **r_kwargs,
                 )
             codes.append(EXIT_OK)
         except Exception:

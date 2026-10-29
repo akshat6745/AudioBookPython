@@ -83,16 +83,21 @@ def _process_entry(payload: dict) -> int:
             with log_path.open("a") as handle:
                 handle.write(line + "\n")
 
-        return int(worker_loop(
-            store,
-            payload["source"],
-            payload["chapters"],
+        w_kwargs = dict(
             identity=payload["identity"],
             batch=payload["batch"],
             device=payload["device"],
             now_fn=time.time,
             log=log,
             profile_file=folder / "batch-profile.json",
+        )
+        if stage == "audio" and payload.get("replace_stale"):
+            w_kwargs["replace_stale"] = True
+        return int(worker_loop(
+            store,
+            payload["source"],
+            payload["chapters"],
+            **w_kwargs,
         ) or 0)
     except Exception:
         print(redact(traceback.format_exc()), flush=True)

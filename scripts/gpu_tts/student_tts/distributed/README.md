@@ -6,9 +6,11 @@ Tagging and audio are independent. Resume lists the chapters you selected and as
 
 ```bash
 ./bootstrap.sh
+./audiobook-worker --list
+./audiobook-worker run --novel "Ghostwater" --stage all --validate
 ./audiobook-worker run --novel "The Eye of the World" --stage tag --workers 4 --batch-size 32 --validate
 ./audiobook-worker validate --novel "The Eye of the World" --stage tag
-./audiobook-worker run --novel "The Eye of the World" --stage audio --workers 2 --batch-size 4 --validate
+./audiobook-worker run --novel "The Eye of the World" --stage audio --workers 1 --batch-size 4 --replace-stale --validate
 ./audiobook-worker validate --novel "The Eye of the World" --stage audio
 ```
 
@@ -165,6 +167,8 @@ On out-of-memory the chapter retries at `floor(N/2)` down to 1. The batch is nev
 `--chapters 1-54` and `--chapters 1,2,5-7` select chapters for `run` and `validate`. The source manifest is the authority. A chapter outside it exits 4. The scan is the whole selection: valid chapters 1–18, missing 19, and valid 20 processes only 19.
 
 `--allow-partial-tags` is a `run` flag. Without it, audio stops when any requested chapter is untagged. With it, audio renders the chapters whose tags already validate and leaves the others untouched.
+
+`--replace-stale` is a `run` flag for the audio stage. By default, chapters whose canonical `chapter_<n>/manifest.json` was rendered under an older voice bank (`legacy_valid` or `stale`) are not overwritten in place. With `--replace-stale`, the worker re-renders those chapters with the active voice bank (`kokoro_af_heart_d018` + `default_seed2`) and replaces `audio-student/styletts2-eye-v1/<slug>/chapter_<n>/` in place so the mobile/web player uses the new voice.
 
 `--report-json PATH` is accepted by `run`, `validate`, and `status`. It writes chapter statuses and counts. Credential values are redacted before the file is written.
 

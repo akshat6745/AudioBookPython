@@ -61,8 +61,34 @@ class Recorder:
     def __init__(self):
         self.calls = 0
 
-    def render_and_publish(self, *args, **kwargs):
+    def render_and_publish(self, store, source, chapter, *args, **kwargs):
         self.calls += 1
+        prefix = layout.audio_prefix(source["slug"], chapter)
+        blob = b"OggS-fake"
+        digest = sha256_bytes(blob)
+        tag_man_sha = sha256_bytes(store.get_bytes(layout.tag_manifest_key(source["slug"], chapter)))
+        spec = next(item for item in source["chapters"] if int(item["chapter"]) == int(chapter))
+        publish_chapter_audio(
+            store,
+            slug=source["slug"],
+            chapter=chapter,
+            dest_prefix=prefix,
+            files={"title.opus": blob, "0.opus": blob, "1.opus": blob, "chapter.opus": blob},
+            manifest={
+                "novel": source["slug"],
+                "chapter": chapter,
+                "source_sha256": spec["sha256"],
+                "tag_manifest_sha256": tag_man_sha,
+                "title": {"file": "title.opus", "bytes": len(blob), "sha256": digest},
+                "paragraphs": [
+                    {"file": "0.opus", "bytes": len(blob), "sha256": digest},
+                    {"file": "1.opus", "bytes": len(blob), "sha256": digest},
+                ],
+                "chapter_file": {"file": "chapter.opus", "bytes": len(blob), "sha256": digest},
+            },
+            attempt_id="rec-1",
+            overwrite=bool(kwargs.get("replace_stale")),
+        )
 
 
 def args(tmp: Path, **kwargs):
@@ -450,6 +476,8 @@ def test_audio_refuses_partial_tags_and_skips_legacy(tmp_path):
     assert execute(args(tmp_path, stage="audio", validate=True, report_json=report_path), store, renderer=recorder, inline=True) == EXIT_OK
     assert recorder.calls == 0
     assert json.loads(report_path.read_text())["counts"]["legacy_valid"] == 1
+    assert execute(args(tmp_path, stage="audio", replace_stale=True), store, renderer=recorder, inline=True) == EXIT_OK
+    assert recorder.calls == 1
 
 
 def test_validation_hash_mismatch_and_publish_order(tmp_path):

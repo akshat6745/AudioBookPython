@@ -47,10 +47,20 @@ def load_index(store) -> dict:
 
 def resolve_novel(index: dict, name: str) -> dict:
     needle = normalize_name(name)
+    try:
+        needle_slug = slugify(name)
+    except RegistryError:
+        needle_slug = ""
     matches = []
     for novel in index.get("novels") or []:
-        names = [novel.get("name", ""), *(novel.get("aliases") or [])]
+        names = [novel.get("name", ""), novel.get("slug", ""), *(novel.get("aliases") or [])]
         if any(normalize_name(item) == needle for item in names if item):
+            matches.append(novel)
+            continue
+        if needle_slug and (
+            novel.get("slug") == needle_slug
+            or any(slugify(item) == needle_slug for item in names if item)
+        ):
             matches.append(novel)
     if not matches:
         raise RegistryError(remedy(name))

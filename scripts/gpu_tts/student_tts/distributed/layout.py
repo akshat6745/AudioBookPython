@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 
 STYLETTS_RUNTIME = "styletts2-eye-v1"
-STYLETTS_VERSION = "2026-10-20.1"
+STYLETTS_VERSION = "2026-10-29.1"
+VOICE_BANK = "kokoro_af_heart_d018"
 TAGGER_RUNTIME = "emotion-tagger-v1"
 TAGGER_MODEL = "deberta3large_teacher2+deberta3_teacher2"
 TAGGER_VERSION = "2026-10-20.1"
@@ -29,6 +30,16 @@ TARGET_LUFS = -18.0
 LIMITER = 0.84
 STYLE_MIX_PROSODY = (0.7, 0.3)  # predicted, reference
 STYLE_MIX_ACOUSTIC = (0.3, 0.7)
+NARRATOR_ALPHA = 0.05
+NARRATOR_BETA = 0.7
+NARRATOR_EMBEDDING_SCALE = 1.0
+NARRATOR_F0_SCALE = 1.0
+NARRATOR_TARGET_DB = -19.0
+DIALOGUE_ALPHA = 0.3
+DIALOGUE_BETA = 0.7
+DIALOGUE_EMBEDDING_SCALE = 1.0
+DIALOGUE_F0_SCALE = 1.0
+DIALOGUE_TARGET_DB = -20.0
 DIFFUSION_STEPS = 5
 EMBEDDING_SCALE = 1
 BANK_EMOTIONS = (
@@ -60,8 +71,8 @@ KNOWN_SHA256 = {
     "jdc/bst.t7": "54dc94364b97e18ac1dfa6287714ed121248cfaac4cfd39d061c6e0a089ef169",
     "plbert/step_1000000.t7": "0714ff85804db43e06b3b0ac5749bf90cf206257c6c5916e8a98c5933b4c21e0",
     "plbert/config.yml": "e5eb4151f130ceae8dd2538f90aced3b66fcad5afa46724b36be435725decdde",
-    "style_bank/bank.npz": "c7cb878be63a10e3a17b7c18c4e3e830eee8772f261433d21ac6e24fee18af6c",
-    "style_bank/bank.json": "770194d093a991c4026d3aaeb4b28ccede9491152ee2dfdb70c20e9c5d586b18",
+    "style_bank/bank.npz": "46e2cfdd1c240e71e97154a07f490d7ccf076e2009a7f977e8ff3549a127d709",
+    "style_bank/bank.json": "80dc579271fc9c55a453cf825ef9302dceec7cda434daeaeaad55089c68f443e",
 }
 
 KNOWN_BYTES = {
@@ -73,7 +84,7 @@ KNOWN_BYTES = {
     "plbert/step_1000000.t7": 25185187,
     "plbert/config.yml": 915,
     "style_bank/bank.npz": 102664,
-    "style_bank/bank.json": 45703,
+    "style_bank/bank.json": 51283,
 }
 
 

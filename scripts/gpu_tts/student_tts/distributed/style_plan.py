@@ -42,6 +42,7 @@ class StyleBank:
         meta = json.loads(json_path.read_text())
         self.vectors = np.load(npz_path)["ref_s"]
         self.entries = meta["entries"]
+        self.inference_params = meta.get("inference_params", {})
         self.cells: dict[str, list[int]] = {}
         for entry in self.entries:
             self.cells.setdefault(entry["cell"], []).append(entry["index"])
@@ -90,6 +91,8 @@ def split_long(text: str) -> list[str]:
     midpoint = len(text) / 2
     cuts = [match.end() for match in re.finditer(r"[;,—:]\s*", text) if 0 < match.end() < len(text)]
     if not cuts:
-        raise ValueError("cannot split a long chunk without a clause break")
+        cuts = [match.end() for match in re.finditer(r"\s+", text) if 0 < match.end() < len(text)]
+    if not cuts:
+        raise ValueError("cannot split a long chunk without a clause or whitespace break")
     cut = min(cuts, key=lambda point: abs(point - midpoint))
     return [text[:cut].rstrip(), text[cut:].lstrip()]

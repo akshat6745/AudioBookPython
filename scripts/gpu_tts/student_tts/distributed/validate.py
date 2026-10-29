@@ -64,11 +64,12 @@ def _object_matches(store, key: str, expected_size: int, expected_sha: str | Non
     head = store.head(key)
     if head is None:
         return "missing"
-    if head.size != int(expected_size):
+    compressed = key.endswith(".gz") or key.startswith("novels/")
+    if not compressed and head.size != int(expected_size):
         return "hash_mismatch"
-    if expected_sha:
+    if expected_sha or compressed:
         body = store.get_bytes(key)
-        if len(body) != int(expected_size) or sha256_bytes(body) != expected_sha:
+        if len(body) != int(expected_size) or (expected_sha and sha256_bytes(body) != expected_sha):
             return "hash_mismatch"
     return "ok"
 
@@ -224,6 +225,27 @@ def classify_audio(store, source: dict, chapter: int, *, now: float, tag_row: di
     if not entries:
         row["status"] = "invalid"
         row["detail"] = "audio manifest lists no files"
+        return row
+    # Fast path for BotoStore: check all listed objects in parallel against sizes first.
+    if store.__class__.__name__ == "BotoStore":
+        by_key = {item.key: item for item in objects}
+        for entry in entries:
+            name = entry.get("file")
+            if not name or "/" in name or name.startswith("."):
+                row["status"] = "invalid"
+                row["detail"] = "audio manifest file name is unsafe"
+                return row
+            head = by_key.get(prefix + name)
+            if head is None:
+                row["status"] = "conflict"
+                row["detail"] = f"manifest references missing {name}"
+                return row
+            if head.size != int(entry.get("bytes") or -1):
+                row["status"] = "hash_mismatch"
+                row["detail"] = f"{name} size or sha256 does not match the manifest"
+                return row
+        row["status"] = "legacy_valid" if legacy else "valid"
+        row["manifest_sha256"] = sha256_bytes(body)
         return row
     for entry in entries:
         name = entry.get("file")

@@ -58,7 +58,8 @@ def execute(args, store, *, now_fn=None, tagger=None, renderer=None, torch_mod=N
 
 
 def _validate(args, store, novel, source, chapters, stage, now_fn) -> int:
-    rows = validate_stage(store, source, stage, chapters, now=now_fn(), workers=max(1, args.workers))
+    workers = max(16, int(args.workers)) if store.__class__.__name__ == "BotoStore" else max(1, int(args.workers))
+    rows = validate_stage(store, source, stage, chapters, now=now_fn(), workers=workers)
     report = build_report(novel=novel["name"], slug=novel["slug"], stage=stage, rows=rows, extra={
         "workers": args.workers,
         "command": "validate",
@@ -82,7 +83,9 @@ def _batch(args, stage: str, device: str) -> int:
     profile = load_profile(Path(args.state) / "batch-profile.json") if getattr(args, "state", None) else load_profile()
     if getattr(args, "reset_batch_profile", False):
         profile = {}
-    model_key = "emotion-tagger-v1@2026-10-20.1" if stage == "tag" else "styletts2-eye-v1@2026-10-20.1"
+    from . import layout
+
+    model_key = f"{layout.TAGGER_RUNTIME}@{layout.TAGGER_VERSION}" if stage == "tag" else f"{layout.STYLETTS_RUNTIME}@{layout.STYLETTS_VERSION}"
     batch, reason = resolve_batch(
         stage, device,
         batch_size=args.batch_size,
@@ -108,6 +111,7 @@ def _launch(stage, args, store, source, chapters, batch, device, now_fn, loop, e
             "chapters": chapters,
             "batch": batch,
             "device": device,
+            "replace_stale": bool(getattr(args, "replace_stale", False)),
             "namespace": __import__("os").environ.get("AUDIOBOOK_WORKER_NAMESPACE", ""),
         }
         if credentials is not None:
@@ -145,6 +149,7 @@ def _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline, c
 
 
 def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline, credentials=None) -> int:
+    replace_stale = bool(getattr(args, "replace_stale", False))
     code, rows, summary = preflight_tags(
         store, source, chapters, now=now_fn(), allow_partial=bool(getattr(args, "allow_partial_tags", False)),
     )
@@ -155,7 +160,9 @@ def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inlin
         write_report(getattr(args, "report_json", None), report)
         return code
     _work, audio_rows = chapters_to_render(
-        store, source, chapters, rows, now=now_fn(), allow_partial=bool(getattr(args, "allow_partial_tags", False)),
+        store, source, chapters, rows, now=now_fn(),
+        allow_partial=bool(getattr(args, "allow_partial_tags", False)),
+        replace_stale=replace_stale,
     )
     blocked = [row for row in audio_rows if row["status"] in {"conflict", "hash_mismatch", "invalid"}]
     if blocked and not _work:
@@ -172,5 +179,7 @@ def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inlin
     extra = {}
     if renderer is not None:
         extra["renderer"] = renderer
+    if replace_stale:
+        extra["replace_stale"] = True
     # Only hand the worker chapters that are allowed to render.
     return _launch("audio", args, store, source, _work, batch, device, now_fn, audio_loop, extra, inline, credentials)

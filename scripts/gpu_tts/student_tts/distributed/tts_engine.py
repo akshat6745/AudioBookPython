@@ -193,14 +193,25 @@ class BatchStudent(Student):
         hidden = (hidden * keep[..., None]).sum(dim=1, keepdim=True) / count[:, None, None]
         return net.to_out(hidden).transpose(-1, -2)
 
-    def _diffusion(self, noises, emb, feats, keep, count):
+    def _diffusion(self, noises, emb, feats, keep, count, embedding_scale=1.0):
         kd = self.model.diffusion.diffusion
         adpm2 = self.sampler.sampler
         sigmas = self.sampler.sigma_schedule(5, self.device)
+        if isinstance(embedding_scale, torch.Tensor):
+            need_cfg = bool((embedding_scale != 1.0).any().item())
+            scale = embedding_scale.view(-1, 1, 1).to(self.device, dtype=torch.float32)
+        else:
+            need_cfg = float(embedding_scale) != 1.0
+            scale = float(embedding_scale)
+        fixed_emb = kd.net.fixed_embedding(emb) if need_cfg else None
 
         def denoise(x, sigma):
             c_skip, c_out, c_in, c_noise = kd.get_scale_weights(torch.full((x.shape[0],), sigma).to(self.device))
-            return c_skip * x + c_out * self._transformer(c_in * x, c_noise, emb, feats, keep, count)
+            out = self._transformer(c_in * x, c_noise, emb, feats, keep, count)
+            if need_cfg:
+                out_masked = self._transformer(c_in * x, c_noise, fixed_emb, feats, keep, count)
+                out = out_masked + (out - out_masked) * scale
+            return c_skip * x + c_out * out
 
         x = sigmas[0] * noises[0]
         for index in range(4):
@@ -245,7 +256,18 @@ class BatchStudent(Student):
         x = x + (1 / gen.alphas[-1]) * (torch.sin(gen.alphas[-1] * x) ** 2)
         return torch.tanh(gen.conv_post(x * lens.mask(factor)))
 
-    def infer_batch(self, tokens: list[list[int]], ref_s: torch.Tensor, seeds: list[int], per_item: str | None = "f0n") -> list[np.ndarray]:
+    def infer_batch(
+        self,
+        tokens: list[list[int]],
+        ref_s: torch.Tensor,
+        seeds: list[int],
+        per_item: str | None = "f0n",
+        alphas: list[float] | float = 0.3,
+        betas: list[float] | float = 0.7,
+        embedding_scales: list[float] | float = 1.0,
+        f0_scales: list[float] | float = 1.0,
+        speeds: list[float] | float = 1.0,
+    ) -> list[np.ndarray]:
         model, device = self.model, self.device
         batch = len(tokens)
         n_cpu = torch.tensor([len(item) for item in tokens])
@@ -264,15 +286,42 @@ class BatchStudent(Student):
             states.append(self._rng_state())
         noises = [torch.cat(item) for item in noises]
         with torch.no_grad():
+            if isinstance(embedding_scales, (list, tuple)):
+                esc = torch.tensor(embedding_scales, dtype=torch.float32, device=device)
+            else:
+                esc = float(embedding_scales)
+            if isinstance(alphas, (list, tuple)):
+                alpha_t = torch.tensor(alphas, dtype=torch.float32, device=device).view(batch, 1)
+            else:
+                alpha_t = float(alphas)
+            if isinstance(betas, (list, tuple)):
+                beta_t = torch.tensor(betas, dtype=torch.float32, device=device).view(batch, 1)
+            else:
+                beta_t = float(betas)
+            if isinstance(f0_scales, (list, tuple)):
+                f0_scale_list = [float(x) for x in f0_scales]
+            else:
+                f0_scale_list = [float(f0_scales)] * batch
             text_encoding = model.text_encoder(ids, lengths, text_mask)
             bert = model.bert(ids, attention_mask=keep.int())
             duration_encoding = model.bert_encoder(bert).transpose(-1, -2)
-            pred = self._diffusion(noises, bert, ref_s, keep, lengths.float()).squeeze(1)
-            prosody = 0.7 * pred[:, 128:] + 0.3 * ref_s[:, 128:]
-            acoustic = 0.3 * pred[:, :128] + 0.7 * ref_s[:, :128]
+            pred = self._diffusion(noises, bert, ref_s, keep, lengths.float(), esc).squeeze(1)
+            prosody = beta_t * pred[:, 128:] + (1.0 - beta_t) * ref_s[:, 128:]
+            acoustic = alpha_t * pred[:, :128] + (1.0 - alpha_t) * ref_s[:, :128]
             duration_hidden = model.predictor.text_encoder(duration_encoding, prosody, lengths, text_mask)
             lstm_out = _packed_lstm(model.predictor.lstm, duration_hidden, n_cpu)
-            duration = torch.round(torch.sigmoid(model.predictor.duration_proj(lstm_out)).sum(-1)).clamp(min=1)
+            raw_dur = torch.sigmoid(model.predictor.duration_proj(lstm_out)).sum(-1)
+            if isinstance(speeds, (list, tuple)):
+                if any(float(sp) != 1.0 and float(sp) > 0 for sp in speeds):
+                    sp_t = torch.tensor(
+                        [float(sp) if float(sp) > 0 else 1.0 for sp in speeds],
+                        dtype=torch.float32,
+                        device=device,
+                    ).view(batch, 1)
+                    raw_dur = raw_dur / sp_t
+            elif float(speeds) != 1.0 and float(speeds) > 0:
+                raw_dur = raw_dur / float(speeds)
+            duration = torch.round(raw_dur).clamp(min=1)
             frames_cpu = duration.to("cpu", torch.long)
             frames = torch.stack([frames_cpu[index, : n_cpu[index]].sum() for index in range(batch)])
             total = int(frames.max())
@@ -293,6 +342,8 @@ class BatchStudent(Student):
                 for index in range(batch):
                     frames_i = int(frames[index])
                     f0, noise = predictor.F0Ntrain(encoded[index:index + 1, :, :frames_i], prosody[index:index + 1])
+                    if f0_scale_list[index] != 1.0:
+                        f0 = f0 * f0_scale_list[index]
                     self._set_rng_state(states[index])
                     waves.append(model.decoder(asr[index:index + 1, :, :frames_i], f0, noise, acoustic[index:index + 1])[0, 0])
                 return [wave.cpu().numpy()[:-50] for wave in waves]
@@ -301,6 +352,9 @@ class BatchStudent(Student):
             for block in predictor.F0:
                 f0, factor = _adain_resblk(block, f0, prosody, lens, factor)
             f0 = predictor.F0_proj(f0).squeeze(1) * lens.mask(2)[:, 0]
+            if any(sc != 1.0 for sc in f0_scale_list):
+                f0_sc_t = torch.tensor(f0_scale_list, dtype=torch.float32, device=device).view(batch, 1)
+                f0 = f0 * f0_sc_t
             factor = 1
             for block in predictor.N:
                 noise, factor = _adain_resblk(block, noise, prosody, lens, factor)

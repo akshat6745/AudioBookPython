@@ -6,7 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .hashing import commit_download, sha256_file
+from .hashing import commit_download, sha256_bytes, sha256_file
 
 
 class PreconditionFailed(Exception):
@@ -37,6 +37,17 @@ def _etag_unquote(etag: str) -> str:
     if etag.startswith('"') and etag.endswith('"'):
         return etag[1:-1]
     return etag
+
+
+def _decode_if_gzip(key: str, raw: bytes) -> bytes:
+    if len(raw) >= 2 and raw[0] == 0x1F and raw[1] == 0x8B and (key.endswith(".gz") or key.startswith("novels/")):
+        import gzip
+
+        try:
+            return gzip.decompress(raw)
+        except OSError:
+            return raw
+    return raw
 
 
 class FakeStore:
@@ -98,7 +109,7 @@ class FakeStore:
             existing = self.objects.get(key)
             if existing is None:
                 raise NotFound(key)
-            return bytes(existing["body"])
+            return _decode_if_gzip(key, bytes(existing["body"]))
 
     def list(self, prefix: str) -> list[Head]:
         with self._lock:
@@ -228,7 +239,7 @@ class BotoStore:
             if mapped is not exc:
                 raise mapped from exc
             raise
-        return response["Body"].read()
+        return _decode_if_gzip(key, response["Body"].read())
 
     def iter_body(self, key: str):
         from botocore.exceptions import ClientError
