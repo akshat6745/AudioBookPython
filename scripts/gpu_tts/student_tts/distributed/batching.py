@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from .layout import AUDIO_CPU_DEFAULT_BATCH, AUDIO_DEFAULT_BATCH, TAG_DEFAULT_BATCH
+from .layout import (
+    AUDIO_CPU_DEFAULT_BATCH,
+    AUDIO_CUDA_DEFAULT_BATCH,
+    AUDIO_DEFAULT_BATCH,
+    BATCH_TOKENS,
+    CUDA_BATCH_TOKENS,
+    TAG_CUDA_DEFAULT_BATCH,
+    TAG_DEFAULT_BATCH,
+)
 
 
 def is_oom(exc: BaseException) -> bool:
@@ -18,10 +26,18 @@ def next_batch(current: int) -> int | None:
 
 def stage_default(stage: str, device: str) -> int:
     if stage == "tag":
-        return TAG_DEFAULT_BATCH
+        return TAG_CUDA_DEFAULT_BATCH if str(device).startswith("cuda") else TAG_DEFAULT_BATCH
     if device == "cpu":
         return AUDIO_CPU_DEFAULT_BATCH
+    if str(device).startswith("cuda"):
+        return AUDIO_CUDA_DEFAULT_BATCH
     return AUDIO_DEFAULT_BATCH
+
+
+def token_budget_for(device: str, default: int = BATCH_TOKENS) -> int:
+    if str(device).startswith("cuda") and default == BATCH_TOKENS:
+        return CUDA_BATCH_TOKENS
+    return default
 
 
 def resolve_batch(

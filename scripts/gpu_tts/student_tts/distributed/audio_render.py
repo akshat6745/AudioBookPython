@@ -13,7 +13,7 @@ import numpy as np
 
 from . import layout
 from .audio_publish import destination_for, publish_chapter_audio, recover_if_elected
-from .batching import call_reducing, group_batches
+from .batching import call_reducing, group_batches, token_budget_for
 from .profile import save_effective
 from .style_plan import (
     BREAK_GAP_S,
@@ -201,11 +201,12 @@ def render_and_publish(store, source, chapter, *, batch, device, worker_id, prof
     if _MODELS is None:
         _MODELS = _load_models(device)
     student, bank = _MODELS
+    effective_budget = token_budget_for(device, token_budget)
 
     def attempt(width: int):
         if claim is not None and now_fn is not None and not claim.heartbeat(now_fn()):
             raise RuntimeError(f"lost the audio lease for chapter {chapter}")
-        return _generate(student, bank, source["slug"], chapter, title, paragraphs, tags, width, token_budget)
+        return _generate(student, bank, source["slug"], chapter, title, paragraphs, tags, width, effective_budget)
 
     def on_reduce(width, _exc):
         log(f"chapter {chapter} audio batch reduced to {width} after OOM")
@@ -274,11 +275,18 @@ def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, toke
         _write_wav(chapter_wav, audio, layout.SAMPLE_RATE)
         audio_filter = _loudnorm(chapter_wav)
         opus_dir = work / "opus"
-        for wav in sorted((work).glob("*.wav")):
-            if wav.name == "chapter.wav":
-                continue
-            _encode(wav, opus_dir / f"{wav.stem}.opus", audio_filter)
-        _encode(chapter_wav, work / "chapter.opus", audio_filter)
+        from concurrent.futures import ThreadPoolExecutor
+
+        wavs = [wav for wav in sorted(work.glob("*.wav")) if wav.name != "chapter.wav"]
+        encode_workers = min(8, max(2, (__import__("os").cpu_count() or 4)))
+        with ThreadPoolExecutor(max_workers=encode_workers) as pool:
+            futures = [
+                pool.submit(_encode, wav, opus_dir / f"{wav.stem}.opus", audio_filter)
+                for wav in wavs
+            ]
+            futures.append(pool.submit(_encode, chapter_wav, work / "chapter.opus", audio_filter))
+            for future in futures:
+                future.result()
         files = {}
         for entry in [{"file": "title.opus"}, *entries, {"file": "chapter.opus"}]:
             path = (work / "chapter.opus") if entry["file"] == "chapter.opus" else opus_dir / entry["file"]

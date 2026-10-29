@@ -50,11 +50,25 @@ def publish_chapter_audio(
     if any(name.startswith("/") or "/" in name for name in files):
         raise ValueError("audio file names must be a single path segment")
     attempt = attempt_prefix(slug, "audio", attempt_id, chapter)
-    for name, body in files.items():
-        store.put_bytes(attempt + name, body, content_type="audio/ogg", if_none_match="*")
-        remote = store.get_bytes(attempt + name)
-        if remote != body:
-            raise ConflictError(f"attempt upload mismatch for {name}")
+    parallel = store.__class__.__name__ == "BotoStore" and len(files) > 1
+    if parallel:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _put_attempt(item: tuple[str, bytes]) -> None:
+            name, body = item
+            store.put_bytes(attempt + name, body, content_type="audio/ogg", if_none_match="*")
+            remote = store.get_bytes(attempt + name)
+            if remote != body:
+                raise ConflictError(f"attempt upload mismatch for {name}")
+
+        with ThreadPoolExecutor(max_workers=min(16, len(files))) as pool:
+            list(pool.map(_put_attempt, list(files.items())))
+    else:
+        for name, body in files.items():
+            store.put_bytes(attempt + name, body, content_type="audio/ogg", if_none_match="*")
+            remote = store.get_bytes(attempt + name)
+            if remote != body:
+                raise ConflictError(f"attempt upload mismatch for {name}")
     manifest = dict(manifest)
     manifest["schema"] = AUDIO_SCHEMA
     manifest["runtime"] = STYLETTS_RUNTIME
@@ -88,14 +102,15 @@ def publish_chapter_audio(
                 )
             plan = existing
             attempt = existing["attempt_prefix"]
-    for name, meta in plan["files"].items():
+    def _commit_final(item: tuple[str, dict]) -> None:
+        name, meta = item
         body = store.get_bytes(attempt + name)
         if len(body) != meta["bytes"] or sha256_bytes(body) != meta["sha256"]:
             raise ConflictError(f"attempt object {name} does not match the publish election")
         final_key = dest_prefix + name
         if overwrite:
             store.put_bytes(final_key, body, content_type="audio/ogg")
-            continue
+            return
         head = store.head(final_key)
         if head is None:
             try:
@@ -110,6 +125,15 @@ def publish_chapter_audio(
             remote = store.get_bytes(final_key)
             if sha256_bytes(remote) != meta["sha256"]:
                 raise ConflictError(f"refusing to overwrite {final_key}: hash differs")
+
+    if parallel:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(16, len(plan["files"]))) as pool:
+            list(pool.map(_commit_final, list(plan["files"].items())))
+    else:
+        for item in plan["files"].items():
+            _commit_final(item)
     body = store.get_bytes(attempt + "manifest.json")
     if sha256_bytes(body) != plan.get("manifest_sha256", sha256_bytes(body)):
         raise ConflictError(f"attempt manifest does not match the publish election for chapter {chapter}")
@@ -127,10 +151,21 @@ def publish_chapter_audio(
     written = store.get_bytes(man_key)
     if sha256_bytes(written) != sha256_bytes(body):
         raise ConflictError(f"audio manifest verification failed for chapter {chapter}")
-    for name, meta in plan["files"].items():
+
+    def _verify_final(item: tuple[str, dict]) -> None:
+        name, meta = item
         remote = store.get_bytes(dest_prefix + name)
         if len(remote) != meta["bytes"] or sha256_bytes(remote) != meta["sha256"]:
             raise ConflictError(f"final audio verification failed for {name}")
+
+    if parallel:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(16, len(plan["files"]))) as pool:
+            list(pool.map(_verify_final, list(plan["files"].items())))
+    else:
+        for item in plan["files"].items():
+            _verify_final(item)
     return "published"
 
 

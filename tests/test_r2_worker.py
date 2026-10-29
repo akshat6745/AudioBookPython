@@ -511,6 +511,9 @@ def test_validation_hash_mismatch_and_publish_order(tmp_path):
 
 def test_batch_defaults_device_and_hash(tmp_path):
     assert resolve_batch("tag", "mps", batch_size=None, tag_batch_size=None, audio_batch_size=None, profile={}, model_key="m")[0] == 32
+    assert resolve_batch("tag", "cuda", batch_size=None, tag_batch_size=None, audio_batch_size=None, profile={}, model_key="m")[0] == 64
+    assert resolve_batch("audio", "mps", batch_size=None, tag_batch_size=None, audio_batch_size=None, profile={}, model_key="m")[0] == 4
+    assert resolve_batch("audio", "cuda", batch_size=None, tag_batch_size=None, audio_batch_size=None, profile={}, model_key="m")[0] == 16
     assert resolve_batch("audio", "cpu", batch_size=None, tag_batch_size=None, audio_batch_size=None, profile={}, model_key="m")[0] == 1
     assert resolve_batch("audio", "cuda", batch_size=4, tag_batch_size=None, audio_batch_size=None, profile={}, model_key="m")[0] == 4
     assert resolve_batch("tag", "cpu", batch_size=8, tag_batch_size=3, audio_batch_size=None, profile={}, model_key="m")[0] == 3
