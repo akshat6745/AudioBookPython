@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import shutil
 import subprocess
+import time
 import uuid
 import wave
 from pathlib import Path
@@ -214,19 +215,34 @@ def render_and_publish(store, source, chapter, *, batch, device, worker_id, prof
 
         empty_cache(device)
 
-    (manifest, files, _width), effective, _tried = call_reducing(batch, attempt, on_reduce=on_reduce)
+    t_chapter_start = time.perf_counter()
+    (manifest, files, _width, timings), effective, _tried = call_reducing(batch, attempt, on_reduce=on_reduce)
     manifest["source_sha256"] = spec["sha256"]
     manifest["tag_manifest_sha256"] = tag_row.get("manifest_sha256")
     manifest["tagger_version"] = layout.TAGGER_MODEL
     manifest["batch_requested"] = batch
     manifest["batch_effective"] = effective
     manifest["worker_id"] = worker_id
+    t_upload_start = time.perf_counter()
     publish_chapter_audio(
         store, slug=source["slug"], chapter=chapter, dest_prefix=dest, files=files,
         manifest=manifest, attempt_id=uuid.uuid4().hex, overwrite=overwrite,
     )
+    upload_s = max(0.001, time.perf_counter() - t_upload_start)
+    total_s = max(0.001, time.perf_counter() - t_chapter_start)
+    audio_s = float(timings["audio_s"])
+    synth_s = max(0.001, float(timings["synth_s"]))
+    encode_s = float(timings["encode_s"])
+    synth_rt = audio_s / synth_s
+    total_rt = audio_s / total_s
     save_effective("audio", device, f"{layout.STYLETTS_RUNTIME}@{layout.STYLETTS_VERSION}", effective, profile_file)
-    log(f"chapter {chapter} audio published batch={effective} files={len(files)}")
+    log(
+        f"chapter {chapter} audio published batch={effective} files={len(files)} | "
+        f"audio={audio_s / 60:.1f}m ({audio_s:.0f}s) | "
+        f"gen={synth_s:.1f}s ({synth_rt:.2f}x realtime) | "
+        f"encode={encode_s:.1f}s upload={upload_s:.1f}s | "
+        f"total={total_s:.1f}s ({total_rt:.2f}x realtime)"
+    )
 
 
 def _tag_blob(store, source, chapter: int) -> str:
@@ -238,7 +254,8 @@ def _tag_blob(store, source, chapter: int) -> str:
     return manifest["jsonl_key"]
 
 
-def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, token_budget) -> tuple[dict, dict[str, bytes], int]:
+def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, token_budget) -> tuple[dict, dict[str, bytes], int, dict]:
+    t_synth_start = time.perf_counter()
     speaker = Speaker(student, bank, batch, token_budget)
     postfx = _postfx()
     del postfx
@@ -252,6 +269,9 @@ def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, toke
     for (chunks, _key, silence), group in zip(plans, jobs):
         clips.append(speaker.stitch(chunks, group, audios[cursor:cursor + len(group)], silence))
         cursor += len(group)
+    student.sync()
+    synth_s = time.perf_counter() - t_synth_start
+    t_encode_start = time.perf_counter()
     work = Path(__import__("tempfile").mkdtemp(prefix=f"audiobook-ch{chapter}-"))
     try:
         title_clip = clips[0][0]
@@ -311,7 +331,15 @@ def _generate(student, bank, slug, chapter, title, paragraphs, tags, batch, toke
         # title bytes were set above inside the loop only for entries. Set title explicitly.
         manifest["title"]["bytes"] = len(files["title.opus"])
         manifest["title"]["sha256"] = hashlib.sha256(files["title.opus"]).hexdigest()
-        return manifest, files, batch
+        encode_s = time.perf_counter() - t_encode_start
+        audio_s = round(len(audio) / layout.SAMPLE_RATE, 3)
+        timings = {
+            "audio_s": audio_s,
+            "synth_s": round(synth_s, 2),
+            "encode_s": round(encode_s, 2),
+            "x_realtime_synth": round(audio_s / max(0.001, synth_s), 2),
+        }
+        return manifest, files, batch, timings
     finally:
         shutil.rmtree(work, ignore_errors=True)
         student.sync()
