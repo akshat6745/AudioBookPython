@@ -15,9 +15,9 @@ from .exitcodes import EXIT_INCOMPLETE, EXIT_INVALID, EXIT_OK, EXIT_SETUP, merge
 from .profile import load_profile
 from .registry import RegistryError, resolve_or_discover_novel
 from .report import build_report, format_summary, write_report
-from .tag_stage import worker_loop as tag_loop
+from .tag_stage import chapters_to_tag, worker_loop as tag_loop
 from .validate import load_source, validate_stage, worst_code
-from .worker import identity_for, run_processes, run_threads
+from .worker import identity_for, run_pipelined_processes, run_processes, run_threads
 
 
 def _now():
@@ -48,10 +48,13 @@ def execute(args, store, *, now_fn=None, tagger=None, renderer=None, torch_mod=N
     if args.command == "validate" or getattr(args, "status_only", False):
         return _validate(args, store, novel, source, chapters, stage, now_fn)
     code = EXIT_OK
-    if stage in {"tag", "all"}:
-        code = merge_codes(code, _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline, credentials))
-    if stage in {"audio", "all"} and code not in {EXIT_SETUP}:
-        code = merge_codes(code, _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline, credentials))
+    if stage == "all" and int(getattr(args, "workers", 1)) >= 2:
+        code = merge_codes(code, _run_all_pipelined(args, store, source, chapters, now_fn, tagger, renderer, torch_mod, inline, credentials))
+    else:
+        if stage in {"tag", "all"}:
+            code = merge_codes(code, _run_tag(args, store, source, chapters, now_fn, tagger, torch_mod, inline, credentials))
+        if stage in {"audio", "all"} and code not in {EXIT_SETUP}:
+            code = merge_codes(code, _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline, credentials))
     if getattr(args, "validate", False):
         code = merge_codes(code, _validate(args, store, novel, source, chapters, stage, now_fn))
     return code
@@ -181,5 +184,104 @@ def _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inlin
         extra["renderer"] = renderer
     if replace_stale:
         extra["replace_stale"] = True
-    # Only hand the worker chapters that are allowed to render.
-    return _launch("audio", args, store, source, _work, batch, device, now_fn, audio_loop, extra, inline, credentials)
+    # Hand all requested chapters to the worker loop so chapters tagged while audio is running are picked up dynamically.
+    target_chapters = chapters if getattr(args, "allow_partial_tags", False) else _work
+    return _launch("audio", args, store, source, target_chapters, batch, device, now_fn, audio_loop, extra, inline, credentials)
+
+
+def _run_all_pipelined(args, store, source, chapters, now_fn, tagger, renderer, torch_mod, inline, credentials=None) -> int:
+    """When --stage all has >=2 workers and untagged chapters exist, run 1 tagger alongside (N-1) audio workers."""
+    tag_work, tag_rows = chapters_to_tag(store, source, chapters, now_fn())
+    if not tag_work:
+        # All requested chapters already have valid tags (or are blocked); go straight to audio with all N workers.
+        device = _device(args, torch_mod)
+        _batch(args, "tag", device)
+        return _run_audio(args, store, source, chapters, now_fn, renderer, torch_mod, inline, credentials)
+
+    blocked_tags = [row for row in tag_rows if row["status"] in {"conflict", "hash_mismatch", "invalid"}]
+    if blocked_tags and not getattr(args, "allow_partial_tags", False):
+        report = build_report(novel=source.get("name", source["slug"]), slug=source["slug"], stage="tag", rows=tag_rows)
+        write_report(getattr(args, "report_json", None), report)
+        print(format_summary(report))
+        return EXIT_INVALID
+
+    device = _device(args, torch_mod)
+    tag_batch = _batch(args, "tag", device)
+    audio_batch = _batch(args, "audio", device)
+    replace_stale = bool(getattr(args, "replace_stale", False))
+    run_id = getattr(args, "run_id", None) or uuid.uuid4().hex
+    host = socket.gethostname()
+    count = max(2, int(args.workers))
+
+    if inline is False:
+        payload = {
+            "run_id": run_id,
+            "host": host,
+            "owners": [uuid.uuid4().hex for _ in range(count)],
+            "source": source,
+            "chapters": chapters,
+            "tag_batch": tag_batch,
+            "audio_batch": audio_batch,
+            "device": device,
+            "replace_stale": replace_stale,
+            "namespace": __import__("os").environ.get("AUDIOBOOK_WORKER_NAMESPACE", ""),
+        }
+        if credentials is not None:
+            payload["credentials"] = credentials
+        return run_pipelined_processes(count, payload)
+
+    import threading
+
+    tags_done = threading.Event()
+    state = getattr(args, "state", None)
+    profile_file = (Path(state) / "batch-profile.json") if state else None
+    tag_identity = identity_for(run_id, 0, host, uuid.uuid4().hex)
+
+    def make_tag_and_join_audio():
+        t_kwargs = dict(
+            store=store, source=source, chapters=chapters, identity=tag_identity,
+            batch=tag_batch, device=device, now_fn=now_fn,
+            log=lambda message, identity=tag_identity: print(f"[{identity['worker_id']}] {message}", flush=True),
+            profile_file=profile_file,
+        )
+        if tagger is not None:
+            t_kwargs["tagger"] = tagger
+        try:
+            t_code = tag_loop(**t_kwargs)
+        finally:
+            tags_done.set()
+        if t_code != EXIT_OK:
+            return t_code
+        a_kwargs = dict(
+            store=store, source=source, chapters=chapters, identity=tag_identity,
+            batch=audio_batch, device=device, now_fn=now_fn,
+            log=lambda message, identity=tag_identity: print(f"[{identity['worker_id']}] {message}", flush=True),
+            profile_file=profile_file,
+            replace_stale=replace_stale,
+            poll_interval=0.02,
+        )
+        if renderer is not None:
+            a_kwargs["renderer"] = renderer
+        return merge_codes(t_code, audio_loop(**a_kwargs))
+
+    calls = [(tag_identity, make_tag_and_join_audio)]
+    for index in range(1, count):
+        identity = identity_for(run_id, index, host, uuid.uuid4().hex)
+
+        def make_audio(identity=identity):
+            a_kwargs = dict(
+                store=store, source=source, chapters=chapters, identity=identity,
+                batch=audio_batch, device=device, now_fn=now_fn,
+                log=lambda message, identity=identity: print(f"[{identity['worker_id']}] {message}", flush=True),
+                profile_file=profile_file,
+                replace_stale=replace_stale,
+                wait_for_tags=tags_done,
+                poll_interval=0.02,
+            )
+            if renderer is not None:
+                a_kwargs["renderer"] = renderer
+            return audio_loop(**a_kwargs)
+
+        calls.append((identity, make_audio))
+
+    return run_threads(calls)

@@ -548,6 +548,65 @@ def test_background_audio_publish_pipeline_overlaps_next_chapter(tmp_path):
     assert events.index(("synth", 2)) < events.index(("publish", 1))
 
 
+def test_stage_all_streams_tagged_chapters_immediately_to_audio_workers(tmp_path):
+    store = FakeStore()
+    book = write_book(tmp_path, {1: "Chapter one.", 2: "Chapter two.", 3: "Chapter three."})
+    publish_novel_tree(store, name="The Eye of the World", slug="the-eye-of-the-world", source_dir=book, chapters=[1, 2, 3])
+
+    timeline = []
+    ch1_audio_started = threading.Event()
+
+    class SlowAfterFirstTagger(FakeTagger):
+        def tag_chapter(self, rows, batch_size, device):
+            out = super().tag_chapter(rows, batch_size, device)
+            timeline.append(("tagged_rows", len(self.batches)))
+            if len(self.batches) >= 2:
+                # Chapter 2 tagging waits until an audio worker has ALREADY started Chapter 1!
+                assert ch1_audio_started.wait(timeout=5.0)
+            return out
+
+    class StreamingRenderer:
+        def render_and_publish(self, store, source, chapter, *args, **kwargs):
+            timeline.append(("audio_start", chapter))
+            if chapter == 1:
+                ch1_audio_started.set()
+            prefix = layout.audio_prefix(source["slug"], chapter)
+            blob = b"OggS-fake"
+            digest = sha256_bytes(blob)
+            tag_man_sha = sha256_bytes(store.get_bytes(layout.tag_manifest_key(source["slug"], chapter)))
+            spec = next(item for item in source["chapters"] if int(item["chapter"]) == int(chapter))
+            publish_chapter_audio(
+                store,
+                slug=source["slug"],
+                chapter=chapter,
+                dest_prefix=prefix,
+                files={"title.opus": blob, "0.opus": blob, "chapter.opus": blob},
+                manifest={
+                    "novel": source["slug"],
+                    "chapter": chapter,
+                    "source_sha256": spec["sha256"],
+                    "tag_manifest_sha256": tag_man_sha,
+                    "title": {"file": "title.opus", "bytes": len(blob), "sha256": digest},
+                    "paragraphs": [{"file": "0.opus", "bytes": len(blob), "sha256": digest}],
+                    "chapter_file": {"file": "chapter.opus", "bytes": len(blob), "sha256": digest},
+                },
+                attempt_id=f"stream-{chapter}",
+            )
+
+    tagger = SlowAfterFirstTagger()
+    renderer = StreamingRenderer()
+    code = execute(
+        args(tmp_path, stage="all", workers=3, tag_batch_size=16, audio_batch_size=8, validate=True),
+        store,
+        tagger=tagger,
+        renderer=renderer,
+        inline=True,
+    )
+    assert code == EXIT_OK
+    assert ch1_audio_started.is_set()
+    assert timeline.index(("audio_start", 1)) < timeline.index(("tagged_rows", 3))
+
+
 def test_validation_hash_mismatch_and_publish_order(tmp_path):
     store = FakeStore()
     book = write_book(tmp_path, {1: "Hello."})

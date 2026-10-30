@@ -73,7 +73,25 @@ def chapters_to_render(store, source, chapters, tag_rows, *, now: float, allow_p
     return work, audio_rows
 
 
-def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: str, now_fn, log, renderer=None, profile_file=None, ttl: float | None = None, token_budget: int = layout.BATCH_TOKENS, replace_stale: bool = False) -> int:
+def worker_loop(
+    store,
+    source,
+    chapters,
+    *,
+    identity: dict,
+    batch: int,
+    device: str,
+    now_fn,
+    log,
+    renderer=None,
+    profile_file=None,
+    ttl: float | None = None,
+    token_budget: int = layout.BATCH_TOKENS,
+    replace_stale: bool = False,
+    wait_for_tags=None,
+    poll_interval: float = 1.5,
+) -> int:
+    import time
     from concurrent.futures import Future, ThreadPoolExecutor
 
     owner = identity["owner"]
@@ -83,6 +101,15 @@ def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: 
     in_flight_chapters: set[int] = set()
     pending_publish: Future | None = None
     bg_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-publish")
+
+    def _tags_still_active() -> bool:
+        if wait_for_tags is None:
+            return False
+        if callable(wait_for_tags):
+            return bool(wait_for_tags())
+        if hasattr(wait_for_tags, "is_set"):
+            return not wait_for_tags.is_set()
+        return bool(wait_for_tags)
 
     def _run_background_finalize(finalize_fn, claimed_lease, hb_ctx, ch_num: int) -> None:
         try:
@@ -101,12 +128,15 @@ def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: 
                 pending_publish = None
             claimed = None
             target = None
+            waiting_on_tag = False
             now = now_fn()
             for chapter in chapters:
                 if chapter in in_flight_chapters:
                     continue
                 tag_row = classify_tag(store, source, chapter, now=now)
                 if tag_row["status"] not in VALID_TAG:
+                    if tag_row["status"] in {"missing", "stale", "leased"}:
+                        waiting_on_tag = True
                     continue
                 audio_row = classify_audio(store, source, chapter, now=now, tag_row=tag_row)
                 if audio_row["status"] in ready:
@@ -134,6 +164,9 @@ def worker_loop(store, source, chapters, *, identity: dict, batch: int, device: 
                 target = chapter
                 break
             if target is None:
+                if waiting_on_tag and _tags_still_active():
+                    time.sleep(poll_interval)
+                    continue
                 break
             assert claimed is not None
             from .leases import Heartbeat
