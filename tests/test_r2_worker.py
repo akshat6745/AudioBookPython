@@ -366,6 +366,21 @@ def test_registry_remedy_and_range(tmp_path):
     assert pending_chapters([18, 19, 20], {18, 20}) == [19]
 
 
+def test_auto_discovers_app_uploaded_novel_from_r2(tmp_path):
+    import gzip
+
+    store = FakeStore()
+    gz_body = gzip.compress(b"First paragraph of Underlord.\n\nSecond paragraph.")
+    store.put_bytes("novels/underlord/chapter_1.txt.gz", gz_body, content_type="application/gzip")
+    tagger = FakeTagger()
+    code = execute(args(tmp_path, novel="underlord", stage="tag", batch_size=16, validate=True), store, tagger=tagger, inline=True)
+    assert code == EXIT_OK
+    assert tagger.batches == [16]
+    source = load_source(store, "underlord")
+    assert len(source["chapters"]) == 1
+    assert source["chapters"][0]["paragraphs"] == 2
+
+
 def test_tag_gap_workers_batch_and_validate(tmp_path):
     store = FakeStore()
     texts = {18: "Eighteen.", 19: "Nineteen is missing.", 20: "Twenty."}

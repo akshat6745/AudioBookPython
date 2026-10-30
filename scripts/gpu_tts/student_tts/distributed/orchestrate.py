@@ -13,7 +13,7 @@ from .chapters import ChapterRangeError, select_chapters
 from .deviceutil import select_device
 from .exitcodes import EXIT_INCOMPLETE, EXIT_INVALID, EXIT_OK, EXIT_SETUP, merge_codes
 from .profile import load_profile
-from .registry import RegistryError, load_index, resolve_novel
+from .registry import RegistryError, resolve_or_discover_novel
 from .report import build_report, format_summary, write_report
 from .tag_stage import worker_loop as tag_loop
 from .validate import load_source, validate_stage, worst_code
@@ -27,7 +27,7 @@ def _now():
 def execute(args, store, *, now_fn=None, tagger=None, renderer=None, torch_mod=None, inline: bool | None = None, credentials=None) -> int:
     now_fn = now_fn or _now
     try:
-        novel = resolve_novel(load_index(store), args.novel)
+        novel = resolve_or_discover_novel(store, args.novel)
         source = load_source(store, novel["slug"])
         allowed = [int(row["chapter"]) for row in source["chapters"]]
         chapters = select_chapters(getattr(args, "chapters", None), allowed)
