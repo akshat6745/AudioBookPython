@@ -88,11 +88,18 @@ class Student:
         return cached
 
     def tokens(self, text: str) -> list[int]:
-        phones = self.phonemizer.phonemize([text])[0]
+        import re
+
+        cleaned = re.sub(r"[\[\]]", " ", text or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned and not re.search(r'[.!?…:;—][”"\')\]]*$', cleaned):
+            cleaned = cleaned + "."
+        phones = self.phonemizer.phonemize([cleaned])[0]
         for mark in ',.!?;:"':
             phones = phones.replace(mark, f" {mark} ")
         tokens = self.cleaner(" ".join(phones.split()))
         tokens.insert(0, 0)
+        tokens.append(0)
         return tokens
 
     def _rng_state(self):
