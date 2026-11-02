@@ -156,9 +156,7 @@ def _publish_checkpoint(store, path: Path) -> dict:
         raise ConflictError("production checkpoint is missing; refusing to upload a second copy blindly")
     if head.size != size:
         raise ConflictError("production checkpoint size differs; refusing to overwrite")
-    # Multipart ETags are not content hashes. Stream the object and compare SHA256.
-    multipart = "-" in head.etag.replace('"', "")
-    if multipart or not _etag_matches(head.etag, VERIFIED_CHECKPOINT["etag"]):
+    if not _etag_matches(head.etag, VERIFIED_CHECKPOINT["etag"]):
         if hasattr(store, "iter_body"):
             actual, got = sha256_iter(store.iter_body(key))
         else:
