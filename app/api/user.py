@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import HTMLResponse
 from app.api.deps import AuthenticatedUser, get_current_user
 from app.core.tokens import TokenError, create_access_token
 from app.models.schemas import (
@@ -427,3 +428,192 @@ async def get_user_progress_for_novel(
     last = rows[0]["chapter_number"] if rows else 1
     last_read_date = rows[0]["updated_at"] if rows else None
     return {"novelName": novelName, "lastChapterRead": last, "lastReadDate": last_read_date}
+
+
+# ── Account Deletion & Privacy Policy (Google Play Requirements) ─────────────
+
+_PROTECTED_USERNAMES = frozenset({"akshat", "demo"})
+
+
+async def _delete_user_account_rows(user: dict) -> None:
+    """Delete a user's progress and account row from D1."""
+    username_lower = (user.get("username") or "").strip().lower()
+    if username_lower in _PROTECTED_USERNAMES:
+        raise HTTPException(
+            status_code=403,
+            detail="This system account cannot be deleted via self-service.",
+        )
+
+    d1 = get_d1_client()
+    user_id = user["id"]
+    await d1.execute("DELETE FROM user_progress WHERE user_id = ?", [user_id])
+    meta = await d1.execute("DELETE FROM users WHERE id = ?", [user_id])
+    if _changed_rows(meta) == 0:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+
+@router.delete("/user/account")
+async def delete_account(
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
+    """Permanently delete the signed-in caller's account and reading progress."""
+    user = await _get_user(caller.username)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    await _delete_user_account_rows(user)
+    logger.info("Deleted user account", username=caller.username, user_id=user["id"])
+    return {
+        "status": "success",
+        "deleted": True,
+        "message": "Your account and reading progress have been permanently deleted.",
+    }
+
+
+@router.post("/user/delete-account-web")
+async def delete_account_web(request: UserLoginRequest):
+    """Web self-service account deletion using username and password."""
+    user = await _get_user(request.username.strip())
+    if not user:
+        raise HTTPException(status_code=401, detail=_INVALID_CREDENTIALS)
+
+    stored = user.get("password") or ""
+    matched = await run_in_threadpool(verify_password, request.password, stored)
+    if not matched and settings.ALLOW_PLAINTEXT_LOGIN:
+        matched = verify_legacy_plaintext(request.password, stored)
+    if not matched:
+        raise HTTPException(status_code=401, detail=_INVALID_CREDENTIALS)
+
+    await _delete_user_account_rows(user)
+    logger.info("Deleted user account via web form", username=user["username"], user_id=user["id"])
+    return {
+        "status": "success",
+        "deleted": True,
+        "message": "Your account and reading progress have been permanently deleted.",
+    }
+
+
+_PRIVACY_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — Speaking Books</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           max-width: 740px; margin: 40px auto; padding: 0 20px; line-height: 1.65; color: #1e293b; }
+    h1, h2 { color: #0f172a; }
+    a { color: #0284c7; }
+    .card { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px 22px; margin: 20px 0; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy — Speaking Books</h1>
+  <p><strong>Effective Date:</strong> November 2026</p>
+  <p>Speaking Books ("we", "our", or "the app") is an audiobook and e-book reader with paragraph-level text-to-speech playback.</p>
+
+  <h2>1. Information We Collect</h2>
+  <ul>
+    <li><strong>Account Information:</strong> When you create an account, we store your chosen username and a bcrypt-hashed password, or your Google account identifier and email address if you sign in with Google.</li>
+    <li><strong>Reading Progress &amp; Uploaded Books:</strong> We store the last chapter read per book so your reading progress syncs across sessions, as well as any EPUB files you upload to your library.</li>
+  </ul>
+
+  <h2>2. How We Use Your Information</h2>
+  <p>Your information is used solely to authenticate your account, display your library, synchronize reading progress, and provide text-to-speech audio playback. We do not sell, rent, or share your personal data with third parties for advertising or marketing.</p>
+
+  <h2>3. Data Security</h2>
+  <p>All network traffic between the app and our servers is encrypted over HTTPS (TLS). Passwords are stored using industry-standard bcrypt hashing, and session tokens are stored in platform-secure storage (Android Keystore).</p>
+
+  <h2>4. Account &amp; Data Deletion</h2>
+  <div class="card">
+    <p>You can permanently delete your account and all associated reading progress at any time:</p>
+    <ul>
+      <li><strong>In the Android app:</strong> Open the <strong>Profile</strong> tab and tap <strong>Delete Account</strong>.</li>
+      <li><strong>On the web:</strong> Visit <a href="/delete-account">/delete-account</a> to delete your account without opening the app.</li>
+    </ul>
+  </div>
+</body>
+</html>
+"""
+
+_DELETE_ACCOUNT_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Delete Account — Speaking Books</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+           max-width: 520px; margin: 48px auto; padding: 0 20px; line-height: 1.6; color: #1e293b; }
+    h1 { color: #0f172a; }
+    .card { background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 12px; padding: 24px; }
+    label { display: block; font-weight: 600; margin-top: 12px; }
+    input { width: 100%; box-sizing: border-box; padding: 10px 12px; margin-top: 6px;
+            border: 1px solid #94a3b8; border-radius: 8px; font-size: 15px; }
+    button { margin-top: 20px; width: 100%; padding: 12px; background: #dc2626; color: #fff;
+             font-weight: 700; font-size: 15px; border: none; border-radius: 8px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #msg { margin-top: 14px; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <h1>Delete Your Speaking Books Account</h1>
+  <p>Deleting your account permanently removes your login credentials and reading progress from Speaking Books.</p>
+  <p><em>Tip:</em> If you signed in with Google, you can also delete your account directly inside the Speaking Books app under <strong>Profile &rarr; Delete Account</strong>.</p>
+  <div class="card">
+    <form id="del-form">
+      <label for="username">Username</label>
+      <input id="username" name="username" required autocomplete="username">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required autocomplete="current-password">
+      <button type="submit" id="submit-btn">Permanently Delete My Account</button>
+      <div id="msg"></div>
+    </form>
+  </div>
+  <script>
+    document.getElementById("del-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById("submit-btn");
+      const msg = document.getElementById("msg");
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+      if (!confirm("Permanently delete account '" + username + "' and all reading progress?")) return;
+      btn.disabled = true;
+      msg.style.color = "#475569";
+      msg.textContent = "Deleting account...";
+      try {
+        const res = await fetch("/user/delete-account-web", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (res.ok && data.deleted) {
+          msg.style.color = "#15803d";
+          msg.textContent = data.message || "Your account has been permanently deleted.";
+          document.getElementById("del-form").reset();
+        } else {
+          msg.style.color = "#dc2626";
+          msg.textContent = data.detail || "Could not delete account.";
+          btn.disabled = false;
+        }
+      } catch (_) {
+        msg.style.color = "#dc2626";
+        msg.textContent = "Network error. Please try again.";
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
+"""
+
+
+@router.get("/privacy", response_class=HTMLResponse)
+async def privacy_policy_page():
+    return HTMLResponse(content=_PRIVACY_HTML, status_code=200)
+
+
+@router.get("/delete-account", response_class=HTMLResponse)
+async def delete_account_page():
+    return HTMLResponse(content=_DELETE_ACCOUNT_HTML, status_code=200)

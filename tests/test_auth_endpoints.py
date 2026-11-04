@@ -107,6 +107,15 @@ class FakeD1:
                     return {"changes": 1}
             return {"changes": 0}
 
+        if sql.startswith("DELETE FROM user_progress"):
+            return {"changes": 1}
+
+        if sql.startswith("DELETE FROM users WHERE id = ?"):
+            uid = params[0]
+            before = len(self.users)
+            self.users = [u for u in self.users if u["id"] != uid]
+            return {"changes": before - len(self.users)}
+
         return {"changes": 0}
 
 
@@ -593,3 +602,42 @@ def test_no_success_response_contains_a_credential(d1, monkeypatch):
         assert "s3cret!" not in body
         assert "tok-abc" not in body
         assert not re.search(r"\$2[aby]\$", body), "bcrypt hash leaked into a response"
+
+
+# ── Account deletion & privacy endpoints ─────────────────────────────────────
+
+def test_delete_account_removes_the_signed_in_user(d1):
+    register("reader1", "s3cret!")
+    assert len(d1.users) == 1
+
+    res = _run(user_api.delete_account(caller=_auth_as("reader1")))
+
+    assert res["deleted"] is True
+    assert d1.users == []
+
+
+def test_delete_account_protects_primary_system_accounts(d1):
+    register("akshat", "s3cret!")
+    with pytest.raises(HTTPException) as exc:
+        _run(user_api.delete_account(caller=_auth_as("akshat")))
+    assert exc.value.status_code == 403
+    assert len(d1.users) == 1
+
+
+def test_web_delete_account_verifies_password_and_removes_user(d1):
+    register("tempuser", "s3cret!")
+    with pytest.raises(HTTPException) as bad:
+        _run(user_api.delete_account_web(UserLoginRequest(username="tempuser", password="wrong")))
+    assert bad.value.status_code == 401
+    assert len(d1.users) == 1
+
+    ok = _run(user_api.delete_account_web(UserLoginRequest(username="tempuser", password="s3cret!")))
+    assert ok["deleted"] is True
+    assert d1.users == []
+
+
+def test_privacy_and_delete_account_html_pages_render():
+    priv = _run(user_api.privacy_policy_page())
+    del_page = _run(user_api.delete_account_page())
+    assert priv.status_code == 200 and "Privacy Policy" in priv.body.decode()
+    assert del_page.status_code == 200 and "/user/delete-account-web" in del_page.body.decode()
