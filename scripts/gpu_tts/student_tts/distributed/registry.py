@@ -48,13 +48,31 @@ def load_index(store) -> dict:
 
 
 def resolve_novel(index: dict, name: str) -> dict:
-    needle = normalize_name(name)
+    raw = (name or "").strip()
+    needle = normalize_name(raw)
     try:
-        needle_slug = slugify(name)
+        needle_slug = slugify(raw)
     except RegistryError:
         needle_slug = ""
+
+    novels = index.get("novels") or []
+
+    # If the caller supplied an exact lowercase slug (e.g. "dune" or "dune-1")
+    # and no other novel claims that string as an alias, resolve directly to
+    # that slug even when multiple uploads share the same display title ("Dune").
+    if raw and raw == needle_slug:
+        exact_slug = [n for n in novels if n.get("slug") == needle_slug]
+        alias_elsewhere = [
+            n
+            for n in novels
+            if n.get("slug") != needle_slug
+            and any(normalize_name(a) == needle for a in (n.get("aliases") or []) if a)
+        ]
+        if len(exact_slug) == 1 and not alias_elsewhere:
+            return exact_slug[0]
+
     matches = []
-    for novel in index.get("novels") or []:
+    for novel in novels:
         names = [novel.get("name", ""), novel.get("slug", ""), *(novel.get("aliases") or [])]
         if any(normalize_name(item) == needle for item in names if item):
             matches.append(novel)
@@ -72,27 +90,7 @@ def resolve_novel(index: dict, name: str) -> dict:
     return matches[0]
 
 
-def resolve_or_discover_novel(store, name: str) -> dict:
-    """Resolve ``name`` in index.json, or auto-register it if ``novels/<slug>/chapter_*.txt*`` exists on R2."""
-    index = load_index(store)
-    try:
-        return resolve_novel(index, name)
-    except RegistryError:
-        pass
-    try:
-        slug = slugify(name)
-    except RegistryError:
-        raise RegistryError(remedy(name)) from None
-    prefix = k(f"novels/{slug}/")
-    heads = store.list(prefix)
-    chapter_keys: list[tuple[int, str]] = []
-    for head in heads:
-        rel = head.key[len(prefix) :] if head.key.startswith(prefix) else ""
-        match = re.fullmatch(r"chapter_([0-9]+)\.txt(?:\.gz)?", rel)
-        if match:
-            chapter_keys.append((int(match.group(1)), head.key))
-    if not chapter_keys:
-        raise RegistryError(remedy(name))
+def _register_r2_novel_folder(store, slug: str, display_name: str, chapter_keys: list[tuple[int, str]]) -> dict:
     chapter_keys.sort(key=lambda item: item[0])
 
     def _build_spec(item: tuple[int, str]) -> dict:
@@ -118,7 +116,6 @@ def resolve_or_discover_novel(store, name: str) -> dict:
         specs = [_build_spec(item) for item in chapter_keys]
     specs.sort(key=lambda row: row["chapter"])
     chapters = [int(row["chapter"]) for row in specs]
-    display_name = name.strip() if name.strip() and name.strip() != slug else slug.replace("-", " ").title()
     titles = {str(row["chapter"]): row["title"] for row in specs}
     manifest = {
         "schema": SOURCE_SCHEMA,
@@ -153,11 +150,67 @@ def resolve_or_discover_novel(store, name: str) -> dict:
     return entry
 
 
+def resolve_or_discover_novel(store, name: str) -> dict:
+    """Resolve ``name`` in index.json, or auto-discover matching ``novels/<slug>*/chapter_*.txt*`` on R2.
+
+    Handles multi-user uploads cleanly:
+    - If two users uploaded the same book (e.g. ``dune`` and ``dune-1``), both are
+      discovered. Passing ``--novel "Dune"`` reports both slugs so the caller can
+      pick ``--novel dune`` or ``--novel dune-1``.
+    - If a previously registered novel was deleted from R2, its stale index entry
+      is ignored so the remaining copy is selected automatically.
+    """
+    raw = (name or "").strip()
+    try:
+        target_slug = slugify(raw)
+    except RegistryError:
+        raise RegistryError(remedy(name)) from None
+
+    base_slug = re.sub(r"-[0-9]+$", "", target_slug)
+    is_explicit_slug = raw == target_slug
+
+    # Discover any R2 novels/<base_slug>/ or novels/<base_slug>-<n>/ folders not yet registered
+    index = load_index(store)
+    known_slugs = {item.get("slug") for item in (index.get("novels") or [])}
+    prefix_root = k(f"novels/{base_slug}")
+    heads = store.list(prefix_root)
+    by_slug: dict[str, list[tuple[int, str]]] = {}
+    novels_root = k("novels/")
+    for head in heads:
+        if not head.key.startswith(novels_root):
+            continue
+        rest = head.key[len(novels_root) :]
+        parts = rest.split("/", 1)
+        if len(parts) != 2:
+            continue
+        cand_slug, rel = parts
+        if cand_slug != base_slug and not re.fullmatch(rf"{re.escape(base_slug)}-[0-9]+", cand_slug):
+            continue
+        match = re.fullmatch(r"chapter_([0-9]+)\.txt(?:\.gz)?", rel)
+        if match:
+            by_slug.setdefault(cand_slug, []).append((int(match.group(1)), head.key))
+
+    for cand_slug, ch_keys in sorted(by_slug.items()):
+        if cand_slug not in known_slugs or store.head(source_manifest_key(cand_slug)) is None:
+            display_name = (
+                raw
+                if raw and not is_explicit_slug
+                else base_slug.replace("-", " ").title()
+            )
+            _register_r2_novel_folder(store, cand_slug, display_name, ch_keys)
+
+    # Filter out any stale index entries whose source manifest was deleted from R2
+    index = load_index(store)
+    active_novels = [
+        item
+        for item in (index.get("novels") or [])
+        if store.head(source_manifest_key(item["slug"])) is not None
+    ]
+    return resolve_novel({"schema": "novel-index/v1", "novels": active_novels}, name)
+
+
 def upsert_novel(index: dict, entry: dict) -> dict:
     novels = [item for item in index.get("novels") or [] if item.get("slug") != entry["slug"]]
-    for item in novels:
-        if normalize_name(item.get("name", "")) == normalize_name(entry["name"]):
-            raise RegistryError(f"name {entry['name']!r} is already registered as {item['slug']}")
     novels.append(entry)
     novels.sort(key=lambda item: item["slug"])
     return {"schema": "novel-index/v1", "novels": novels}

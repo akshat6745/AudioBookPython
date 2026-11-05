@@ -689,3 +689,25 @@ def test_namespace_keys_do_not_look_like_production(monkeypatch):
     assert key.startswith("student_tts/_smoke/unit/")
     monkeypatch.delenv("AUDIOBOOK_WORKER_NAMESPACE")
     assert layout.audio_prefix("the-eye-of-the-world", 1) == "audio-student/styletts2-eye-v1/the-eye-of-the-world/chapter_1/"
+
+
+def test_multi_user_same_title_uploads_discover_and_resolve_cleanly():
+    from scripts.gpu_tts.student_tts.distributed.registry import RegistryError, resolve_or_discover_novel
+
+    store = FakeStore()
+    store.put_bytes("novels/dune/chapter_1.txt", b"Alice chapter one.", content_type="text/plain")
+    store.put_bytes("novels/dune-1/chapter_1.txt", b"Bob chapter one.", content_type="text/plain")
+
+    # Passing the ambiguous title "Dune" discovers both and asks the caller to pick a slug
+    with pytest.raises(RegistryError, match="multiple registry slugs"):
+        resolve_or_discover_novel(store, "Dune")
+
+    # Passing the exact slug selects that user's copy unambiguously
+    assert resolve_or_discover_novel(store, "dune")["slug"] == "dune"
+    assert resolve_or_discover_novel(store, "dune-1")["slug"] == "dune-1"
+
+    # If Alice deletes her copy ('dune'), "Dune" automatically resolves to Bob's 'dune-1'
+    store.delete(layout.source_manifest_key("dune"))
+    store.delete("novels/dune/chapter_1.txt")
+    assert resolve_or_discover_novel(store, "Dune")["slug"] == "dune-1"
+
