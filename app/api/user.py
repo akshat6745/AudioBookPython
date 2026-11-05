@@ -360,7 +360,7 @@ async def save_user_progress(
     try:
         d1 = get_d1_client()
         user_id = user["id"]
-        novel_id = await resolve_novel_id(d1, request.novelName)
+        novel_id = await resolve_novel_id(d1, request.novelName, username=caller.username)
 
         # Upsert into user_progress (INSERT OR REPLACE updates if UNIQUE constraint fires)
         await d1.execute(
@@ -419,7 +419,7 @@ async def get_user_progress_for_novel(
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     d1 = get_d1_client()
-    novel_id = await resolve_novel_id(d1, novelName)
+    novel_id = await resolve_novel_id(d1, novelName, username=caller.username)
     
     rows = await d1.query(
         "SELECT chapter_number, updated_at FROM user_progress WHERE user_id = ? AND novel_id = ?",

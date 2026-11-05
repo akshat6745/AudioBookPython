@@ -397,7 +397,7 @@ def _patch_progress_io(d1, monkeypatch, recorded):
             }
         ]
 
-    async def fake_resolve_novel_id(_d1, novel_name):
+    async def fake_resolve_novel_id(_d1, novel_name, **kwargs):
         return "novel-1"
 
     monkeypatch.setattr(d1, "execute", fake_execute)

@@ -49,11 +49,24 @@ async def store_novel(
     slug = generate_slug(novel.title)
 
     # ── Check if novel already exists in D1 ───────────────────────────────
-    existing = await d1.query(
-        "SELECT id, total_chapters FROM novels WHERE id = ?", [slug]
-    )
-    if existing and existing[0].get("total_chapters", 0) > 0:
-        return None
+    if user_id is None:
+        existing = await d1.query(
+            "SELECT id, total_chapters FROM novels WHERE id = ?", [slug]
+        )
+        if existing and existing[0].get("total_chapters", 0) > 0:
+            return None
+    else:
+        # User upload: only short-circuit if THIS user already uploaded a
+        # non-empty novel with this title (or already owns the base slug).
+        # If another user or the public catalog owns `slug`, the collision
+        # loop below assigns a distinct slug (e.g. `dune-1`) for this user.
+        existing_owned = await d1.query(
+            "SELECT id, total_chapters FROM novels "
+            "WHERE user_id = ? AND (id = ? OR LOWER(title) = LOWER(?))",
+            [user_id, slug, novel.title],
+        )
+        if any(r.get("total_chapters", 0) > 0 for r in existing_owned):
+            return None
 
     # Make slug unique if collision
     base_slug = slug

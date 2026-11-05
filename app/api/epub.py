@@ -69,7 +69,7 @@ async def upload_epub(
         # id would silently create an orphaned novel.
         d1 = get_d1_client()
         user_rows = await d1.query(
-            "SELECT id FROM users WHERE username = ?", [caller.username]
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE", [caller.username]
         )
         if not user_rows:
             raise HTTPException(status_code=401, detail="Not authenticated")
@@ -115,6 +115,8 @@ async def upload_epub(
                 # Don't fail the whole upload for image errors
 
         return NovelUploadResponse(
+            id=slug,
+            slug=slug,
             title=novel.title,
             author=novel.author,
             chapterCount=len(chapters),

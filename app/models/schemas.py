@@ -14,6 +14,7 @@ class NovelInfo(BaseModel):
     hasImages: Optional[bool] = False
     imageCount: Optional[int] = 0
     isPublic: Optional[bool] = False
+    isOwner: Optional[bool] = False
 
 class TTSRequest(BaseModel):
     text: str
@@ -55,6 +56,8 @@ class Novel(BaseModel):
     chapters: List[Chapter]
 
 class NovelUploadResponse(BaseModel):
+    id: Optional[str] = None
+    slug: Optional[str] = None
     title: str
     author: str
     chapterCount: int

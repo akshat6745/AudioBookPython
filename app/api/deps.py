@@ -59,3 +59,16 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail=_NOT_AUTHENTICATED)
 
     return AuthenticatedUser(id=claims.user_id, username=claims.username)
+
+
+async def get_optional_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+) -> Optional[AuthenticatedUser]:
+    """Resolve the caller if a valid bearer token is present, otherwise None."""
+    if credentials is None or not credentials.credentials:
+        return None
+    try:
+        claims = decode_access_token(credentials.credentials)
+    except TokenError:
+        return None
+    return AuthenticatedUser(id=claims.user_id, username=claims.username)

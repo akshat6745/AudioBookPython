@@ -1,13 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from typing import List, Optional
 from bs4 import BeautifulSoup, Tag, NavigableString, Comment
-from app.api.deps import AuthenticatedUser, get_current_user
+from app.api.deps import AuthenticatedUser, get_current_user, get_optional_user
 from app.core.rate_limit import rate_limit
 from app.core.settings import settings
 from app.core.config import DOC_ID
 from app.core.utils import get_headers
 from app.core.d1_client import get_d1_client
-from app.services.cloudflare_service import get_chapter_paragraphs
+from app.services.cloudflare_service import get_chapter_paragraphs, _r2_client, _r2_bucket
+from app.services.novel_store import cover_r2_key, generate_slug
 import aiohttp
 import re
 from fastapi.responses import StreamingResponse
@@ -136,32 +138,43 @@ async def fetch_names(caller: AuthenticatedUser = Depends(get_current_user)):
 
     The library is scoped to the verified token, not to a username supplied by
     the caller — that parameter previously let anyone read anyone's library.
-
-    Ordered by recent activity: whichever is later of the caller's last read
-    and the novel being added, so new novels surface at the top just like the
-    last-read one. Timestamps are compared via julianday() because they are
-    stored in mixed formats ('YYYY-MM-DD HH:MM:SS' and ISO 8601 with 'T' and a
-    UTC offset), which don't order correctly as plain strings.
+    If the caller uploaded their own copy of a novel whose title also exists in
+    the public catalog, the caller sees the version they uploaded.
     """
     try:
         d1 = get_d1_client()
         username = caller.username
+        user_id = await _resolve_caller_user_id(d1, username)
 
-        # Single round-trip: resolve user_id via subquery + fetch novels.
         rows = await d1.query(
             "SELECT n.id, n.id AS slug, n.title, n.author, n.description, "
-            "n.total_chapters, n.is_public, up.updated_at AS last_read_date "
+            "n.total_chapters, n.is_public, n.user_id, up.updated_at AS last_read_date "
             "FROM novels n "
             "LEFT JOIN user_progress up "
             "  ON up.novel_id = n.id "
-            " AND up.user_id = (SELECT id FROM users WHERE username = ?) "
-            "WHERE n.user_id = (SELECT id FROM users WHERE username = ?) "
+            " AND up.user_id = (SELECT id FROM users WHERE username = ? COLLATE NOCASE) "
+            "WHERE n.user_id = (SELECT id FROM users WHERE username = ? COLLATE NOCASE) "
             "   OR n.is_public = 1 "
             "ORDER BY MAX(COALESCE(julianday(up.updated_at), 0), "
             "             COALESCE(julianday(n.created_at), 0)) DESC, "
             "         n.total_chapters DESC",
             [username, username],
         )
+
+        # If the caller uploaded their own version of a novel, shadow any
+        # unowned public duplicate with the same title so they see their own version.
+        owned_titles = {
+            (row.get("title") or "").strip().lower()
+            for row in rows
+            if user_id is not None and row.get("user_id") == user_id
+        }
+
+        visible_rows = [
+            row
+            for row in rows
+            if (user_id is not None and row.get("user_id") == user_id)
+            or (row.get("title") or "").strip().lower() not in owned_titles
+        ]
 
         novels = [
             NovelInfo(
@@ -173,47 +186,252 @@ async def fetch_names(caller: AuthenticatedUser = Depends(get_current_user)):
                 source="cloudflare_d1",
                 description=row.get("description"),
                 isPublic=bool(row.get("is_public", 0)),
+                isOwner=bool(user_id is not None and row.get("user_id") == user_id),
             )
-            for row in rows
+            for row in visible_rows
         ]
 
         logger.info("Fetched novels from D1", count=len(novels), username=username)
         return novels
     except Exception as e:
         logger.error("Error fetching novels from D1", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Error fetching novels: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching novels")
 
 
-async def resolve_novel_id(d1, name: str) -> str:
-    """
-    Resolve a novel identifier (slug OR title) to a D1 novel ID (slug).
-    Tries exact slug match first, then case-insensitive title fallback.
-    Raises 404 if not found.
-    """
-    # 1. Try slug (exact)
-    rows = await d1.query("SELECT id FROM novels WHERE id = ?", [name])
-    if rows:
-        return rows[0]["id"]
-
-    # 2. Try title (case-insensitive) — for old frontend clients
+async def _resolve_caller_user_id(d1, username: Optional[str]) -> Optional[str]:
+    if not username:
+        return None
     rows = await d1.query(
-        "SELECT id FROM novels WHERE LOWER(title) = LOWER(?)", [name]
+        "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
+        [username],
     )
-    if rows:
-        return rows[0]["id"]
+    return rows[0]["id"] if rows else None
+
+
+async def resolve_novel_id(
+    d1, name: str, username: Optional[str] = None
+) -> str:
+    """Resolve a novel identifier (slug OR title) to a D1 novel ID (slug).
+
+    When `username` is provided, resolution is scoped to novels visible to that
+    user (their own uploads + public novels) and prefers the caller's own
+    uploaded version when two users (or the public catalog) share a title.
+    """
+    user_id = await _resolve_caller_user_id(d1, username)
+
+    if user_id is not None:
+        # 1. Exact slug owned by the caller
+        owned_exact = await d1.query(
+            "SELECT id FROM novels WHERE id = ? AND user_id = ?",
+            [name, user_id],
+        )
+        if owned_exact:
+            return owned_exact[0]["id"]
+
+        # 2. Title or base-slug match owned by the caller (so when 2 users upload
+        #    the same book, each user resolves to the version they uploaded)
+        owned_rows = await d1.query(
+            "SELECT id, title FROM novels WHERE user_id = ?",
+            [user_id],
+        )
+        needle = name.strip().lower()
+        for row in owned_rows:
+            title = (row.get("title") or "").strip()
+            if title.lower() == needle or generate_slug(title) == needle:
+                return row["id"]
+
+        # 3. Public novel by exact slug
+        pub_exact = await d1.query(
+            "SELECT id FROM novels WHERE id = ? AND is_public = 1",
+            [name],
+        )
+        if pub_exact:
+            return pub_exact[0]["id"]
+
+        # 4. Public novel by case-insensitive title
+        pub_title = await d1.query(
+            "SELECT id FROM novels WHERE LOWER(title) = LOWER(?) AND is_public = 1",
+            [name],
+        )
+        if pub_title:
+            return pub_title[0]["id"]
+
+        raise HTTPException(status_code=404, detail=f"Novel '{name}' not found")
+
+    # Unauthenticated fallback: only public or unowned novels
+    rows = await d1.query("SELECT id, user_id, is_public FROM novels WHERE id = ?", [name])
+    for row in rows:
+        if row.get("is_public", 1) == 1 or row.get("user_id") is None:
+            return row["id"]
+
+    rows = await d1.query(
+        "SELECT id, user_id, is_public FROM novels WHERE LOWER(title) = LOWER(?)", [name]
+    )
+    for row in rows:
+        if row.get("is_public", 1) == 1 or row.get("user_id") is None:
+            return row["id"]
 
     raise HTTPException(status_code=404, detail=f"Novel '{name}' not found")
 
 
+@router.delete("/novel/{novel_id}")
+@router.delete("/novels/{novel_id}")
+async def delete_novel(
+    novel_id: str,
+    caller: AuthenticatedUser = Depends(get_current_user),
+):
+    """Delete a novel uploaded by the authenticated caller.
+
+    Strictly scoped to the caller's `user_id` and the target novel's `id` so
+    that if two users uploaded the same book, deleting one user's upload only
+    removes their own copy (D1 rows + unshared R2 objects) and never touches
+    another user's upload or public catalog novels.
+    """
+    d1 = get_d1_client()
+    user_id = await _resolve_caller_user_id(d1, caller.username)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    # 1. Match by exact novel ID (slug) owned by this caller
+    owned = await d1.query(
+        "SELECT id, title, user_id, is_public, cover_url FROM novels "
+        "WHERE id = ? AND user_id = ?",
+        [novel_id, user_id],
+    )
+
+    # 2. If the caller passed a title or base slug instead of their suffixed
+    #    slug (e.g. "My Book" when their slug is "my-book-1"), resolve among
+    #    novels owned by this caller.
+    if not owned:
+        all_owned = await d1.query(
+            "SELECT id, title, user_id, is_public, cover_url FROM novels WHERE user_id = ?",
+            [user_id],
+        )
+        needle = novel_id.strip().lower()
+        matches = [
+            r
+            for r in all_owned
+            if (r.get("title") or "").strip().lower() == needle
+            or generate_slug(r.get("title") or "") == needle
+        ]
+        if len(matches) > 1:
+            slugs = ", ".join(r["id"] for r in matches)
+            raise HTTPException(
+                status_code=409,
+                detail=f"Multiple uploaded novels match '{novel_id}'; specify the exact slug ({slugs})",
+            )
+        owned = matches
+
+    if not owned:
+        # Check if the novel is a public catalog book (which callers cannot delete)
+        pub = await d1.query(
+            "SELECT id, is_public, user_id FROM novels "
+            "WHERE (id = ? OR LOWER(title) = LOWER(?)) AND is_public = 1",
+            [novel_id, novel_id],
+        )
+        if pub:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete novels that you uploaded",
+            )
+        raise HTTPException(status_code=404, detail="Novel not found")
+
+    target = owned[0]
+    target_slug = target["id"]
+    target_title = target["title"]
+
+    try:
+        chapter_rows = await d1.query(
+            "SELECT r2_content_path, r2_audio_path FROM chapters WHERE novel_id = ?",
+            [target_slug],
+        )
+
+        # Delete D1 rows strictly for this novel slug and owner
+        await d1.execute("DELETE FROM user_progress WHERE novel_id = ?", [target_slug])
+        await d1.execute("DELETE FROM chapters WHERE novel_id = ?", [target_slug])
+        await d1.execute(
+            "DELETE FROM novels WHERE id = ? AND user_id = ?",
+            [target_slug, user_id],
+        )
+
+        # Collect R2 keys that belonged to this novel and verify no other novel
+        # in D1 references them before deleting from R2.
+        r2_keys_to_delete: list[str] = []
+        for ch in chapter_rows:
+            for col in ("r2_content_path", "r2_audio_path"):
+                key = ch.get(col)
+                if not key:
+                    continue
+                still_used = await d1.query(
+                    f"SELECT 1 FROM chapters WHERE {col} = ? LIMIT 1",
+                    [key],
+                )
+                if not still_used:
+                    r2_keys_to_delete.append(key)
+
+        for cover_key in {target.get("cover_url"), cover_r2_key(target_slug)}:
+            if not cover_key:
+                continue
+            still_used = await d1.query(
+                "SELECT 1 FROM novels WHERE cover_url = ? LIMIT 1",
+                [cover_key],
+            )
+            if not still_used:
+                r2_keys_to_delete.append(cover_key)
+
+        if r2_keys_to_delete:
+            def _delete_r2_keys(keys: list[str]) -> None:
+                try:
+                    s3 = _r2_client()
+                    bucket = _r2_bucket()
+                    if not s3 or not bucket:
+                        return
+                    for k in keys:
+                        try:
+                            s3.delete_object(Bucket=bucket, Key=k)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            await run_in_threadpool(_delete_r2_keys, r2_keys_to_delete)
+
+        get_chapter_paragraphs.cache_clear()
+        logger.info(
+            "Deleted novel",
+            novel=target_slug,
+            title=target_title,
+            username=caller.username,
+            r2_objects_deleted=len(r2_keys_to_delete),
+        )
+        return {
+            "status": "success",
+            "deleted": True,
+            "novelId": target_slug,
+            "title": target_title,
+            "message": f"Novel '{target_title}' deleted successfully",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error deleting novel", novel=target_slug, error=str(e))
+        raise HTTPException(status_code=500, detail="Error deleting novel")
+
+
 @router.get("/chapters-with-pages/{novel_name}")
-async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
+async def fetch_chapters_with_pages(
+    novel_name: str,
+    page: Optional[int] = 1,
+    caller: Optional[AuthenticatedUser] = Depends(get_optional_user),
+):
     """Fetch paginated chapter list (metadata only) from Cloudflare D1."""
     try:
         d1 = get_d1_client()
         limit  = 100
         offset = (page - 1) * limit
+        username = caller.username if isinstance(caller, AuthenticatedUser) else None
 
-        novel_id = await resolve_novel_id(d1, novel_name)
+        novel_id = await resolve_novel_id(d1, novel_name, username=username)
 
         # total_chapters from novels table is a fast cached count
         novel_row = await d1.query("SELECT total_chapters FROM novels WHERE id = ?", [novel_id])
@@ -247,11 +465,16 @@ async def fetch_chapters_with_pages(novel_name: str, page: Optional[int] = 1):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching chapters: {str(e)}")
+        logger.error("Error fetching chapters", novel=novel_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Error fetching chapters")
 
 
 @router.get("/chapter")
-async def fetch_chapter(chapterNumber: int, novelName: str):
+async def fetch_chapter(
+    chapterNumber: int,
+    novelName: str,
+    caller: Optional[AuthenticatedUser] = Depends(get_optional_user),
+):
     """
     Fetch a single chapter's content.
     Metadata comes from Cloudflare D1; text content is streamed from R2.
@@ -259,7 +482,8 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
     """
     try:
         d1 = get_d1_client()
-        novel_id = await resolve_novel_id(d1, novelName)
+        username = caller.username if isinstance(caller, AuthenticatedUser) else None
+        novel_id = await resolve_novel_id(d1, novelName, username=username)
 
         rows = await d1.query(
             "SELECT chapter_number, title, r2_content_path "
@@ -296,7 +520,7 @@ async def fetch_chapter(chapterNumber: int, novelName: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error("Error fetching chapter", novel=novelName, chapter=chapterNumber, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Error fetching chapter content: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error fetching chapter content")
 
 
 @router.get("/novel-with-tts")
