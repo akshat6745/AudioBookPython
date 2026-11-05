@@ -63,7 +63,7 @@ async def download_chapter(
 
         # 1. Fetch chapter content
         logger.info("Fetching chapter content", novel=novel_name, chapter=chapter_number)
-        chapter = await fetch_chapter(chapter_number, novel_name)
+        chapter = await fetch_chapter(chapter_number, novel_name, caller=caller)
         paragraphs = chapter.get("content", [])
         chapter_title = chapter.get("chapterTitle", "Unknown Title")
         

@@ -91,7 +91,8 @@ async def start_chapter_download(
             request.novel_name,
             request.chapter_number,
             request.narrator_voice,
-            request.dialogue_voice
+            request.dialogue_voice,
+            caller,
         )
 
         logger.info("Download started", download_id=download_id, novel=request.novel_name, chapter=request.chapter_number)
@@ -154,7 +155,8 @@ async def process_chapter_download(
     novel_name: str,
     chapter_number: int,
     narrator_voice: str,
-    dialogue_voice: str
+    dialogue_voice: str,
+    caller: Optional[AuthenticatedUser] = None,
 ):
     """Background task to process chapter download."""
 
@@ -180,7 +182,7 @@ async def process_chapter_download(
 
         # 1. Fetch chapter content
         logger.info("Fetching chapter content", novel=novel_name, chapter=chapter_number)
-        chapter_data = await fetch_chapter(chapter_number, novel_name)
+        chapter_data = await fetch_chapter(chapter_number, novel_name, caller=caller)
         paragraphs = chapter_data.get("content", [])
         chapter_title = chapter_data.get("chapterTitle", f"Chapter {chapter_number}")
 

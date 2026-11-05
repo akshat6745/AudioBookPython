@@ -313,9 +313,17 @@ async def upload_novel_cover(
 
     try:
         d1 = get_d1_client()
-        rows = await d1.query("SELECT id FROM novels WHERE id = ?", [novel_id])
+        user_rows = await d1.query(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
+            [caller.username],
+        )
+        caller_user_id = user_rows[0]["id"] if user_rows else None
+        rows = await d1.query("SELECT id, user_id FROM novels WHERE id = ?", [novel_id])
         if not rows:
             raise HTTPException(status_code=404, detail="Novel not found")
+        owner_id = rows[0].get("user_id")
+        if owner_id is not None and owner_id != caller_user_id:
+            raise HTTPException(status_code=403, detail="Not authorized to modify this novel's cover")
 
         image_bytes = await file.read()
         r2_key = cover_r2_key(novel_id)

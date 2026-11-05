@@ -29,7 +29,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.api.deps import AuthenticatedUser, get_current_user
+from app.core.d1_client import get_d1_client
+from app.core.settings import settings
 from app.services.cloudflare_service import _r2_bucket, _r2_client
+from app.services.novel_store import generate_slug
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -148,6 +151,65 @@ def _missing_object(exc: ClientError) -> bool:
     return code in {"NoSuchKey", "404", "NotFound"}
 
 
+async def _resolve_caller_student_slug(slug: str, caller: AuthenticatedUser) -> str:
+    """Resolve `slug` against the caller's owned novels in D1 when available.
+
+    - If the caller owns a novel whose base title slug matches `slug` (for
+      example, User B uploaded 'Dune' and got slug 'dune-1', while a client
+      derived 'dune' from the title), return the caller's own slug ('dune-1').
+    - If `slug` in D1 belongs to another user's private upload (`is_public = 0`),
+      refuse with 404 so one user never reads another user's private audio.
+    - If D1 is not configured (e.g. unit tests with a fake R2 only) or the slug
+      is not in D1, return `slug` unchanged.
+    """
+    if not (
+        getattr(settings, "CF_ACCOUNT_ID", None)
+        and getattr(settings, "D1_DATABASE_ID", None)
+        and getattr(settings, "CF_API_TOKEN", None)
+    ):
+        return slug
+
+    try:
+        d1 = get_d1_client()
+        user_rows = await d1.query(
+            "SELECT id FROM users WHERE username = ? COLLATE NOCASE",
+            [caller.username],
+        )
+        if not user_rows:
+            return slug
+        caller_user_id = user_rows[0]["id"]
+
+        owned_rows = await d1.query(
+            "SELECT id, title FROM novels WHERE user_id = ?",
+            [caller_user_id],
+        )
+        for row in owned_rows:
+            if row["id"] == slug:
+                return slug
+        for row in owned_rows:
+            title = (row.get("title") or "").strip()
+            if title and generate_slug(title) == slug:
+                return row["id"]
+
+        novel_rows = await d1.query(
+            "SELECT id, user_id, is_public FROM novels WHERE id = ?",
+            [slug],
+        )
+        if novel_rows:
+            row = novel_rows[0]
+            is_public = bool(row.get("is_public", 0))
+            owner_id = row.get("user_id")
+            if not is_public and owner_id is not None and owner_id != caller_user_id:
+                raise HTTPException(status_code=404, detail=_MISSING)
+    except HTTPException:
+        raise
+    except Exception:
+        # Best-effort D1 check; do not break playback if D1 is unreachable
+        pass
+
+    return slug
+
+
 async def stream_allowlisted_student_audio(key: str) -> StreamingResponse:
     """Stream an already-validated student-audio key. Read-only."""
     media_type = content_type_for_student_audio(key)
@@ -213,6 +275,9 @@ async def get_student_audio_paragraph(
     an object key. Read-only.
     """
     key = student_audio_key_from_params(novel, chapter, paragraph)
+    resolved_slug = await _resolve_caller_student_slug(novel, caller)
+    if resolved_slug != novel:
+        key = student_audio_key_from_params(resolved_slug, chapter, paragraph)
     return await stream_allowlisted_student_audio(key)
 
 
@@ -223,4 +288,12 @@ async def get_student_audio(
 ):
     """Stream one allowlisted student-audio object. Read-only."""
     key = validate_student_audio_key(object_key)
+    match = _OBJECT_RE.fullmatch(key)
+    if match is not None:
+        slug = match.group("slug")
+        resolved_slug = await _resolve_caller_student_slug(slug, caller)
+        if resolved_slug != slug:
+            key = validate_student_audio_key(
+                f"{STUDENT_AUDIO_PREFIX}{resolved_slug}/{match.group('chapter')}/{match.group('filename')}"
+            )
     return await stream_allowlisted_student_audio(key)

@@ -83,6 +83,12 @@ def _install(monkeypatch, objects: dict[str, bytes]) -> FakeR2:
     fake = FakeR2(objects)
     monkeypatch.setattr("app.api.student_audio._r2_client", lambda: fake)
     monkeypatch.setattr("app.api.student_audio._r2_bucket", lambda: "test-bucket")
+
+    class _EmptyD1:
+        async def query(self, sql, params=None):
+            return []
+
+    monkeypatch.setattr("app.api.student_audio.get_d1_client", lambda: _EmptyD1())
     return fake
 
 
@@ -227,6 +233,12 @@ def test_r2_failure_does_not_echo_the_client_error(monkeypatch):
     monkeypatch.setattr("app.api.student_audio._r2_client", lambda: BrokenR2())
     monkeypatch.setattr("app.api.student_audio._r2_bucket", lambda: "test-bucket")
 
+    class _EmptyD1:
+        async def query(self, sql, params=None):
+            return []
+
+    monkeypatch.setattr("app.api.student_audio.get_d1_client", lambda: _EmptyD1())
+
     with pytest.raises(HTTPException) as exc:
         _run(get_student_audio(f"{EYE}/chapter_1/manifest.json", caller=_caller()))
 
@@ -352,3 +364,62 @@ def test_paragraph_request_rejects_bad_slugs_and_bad_indexes(
 
     assert exc.value.status_code == 403
     assert fake.calls == []
+
+
+def test_student_audio_resolves_caller_owned_duplicate_upload_and_blocks_other_users_private_novel(monkeypatch):
+    from app.core.settings import settings
+
+    monkeypatch.setattr(settings, "CF_ACCOUNT_ID", "acc", raising=False)
+    monkeypatch.setattr(settings, "D1_DATABASE_ID", "db", raising=False)
+    monkeypatch.setattr(settings, "CF_API_TOKEN", "tok", raising=False)
+
+    class FakeD1:
+        async def query(self, sql, params=None):
+            params = params or []
+            if "FROM users WHERE username = ?" in sql:
+                uname = str(params[0]).lower()
+                if uname == "alice":
+                    return [{"id": "u-alice"}]
+                if uname == "bob":
+                    return [{"id": "u-bob"}]
+                if uname == "charlie":
+                    return [{"id": "u-charlie"}]
+                return []
+            if "FROM novels WHERE user_id = ?" in sql:
+                uid = params[0]
+                if uid == "u-alice":
+                    return [{"id": "dune", "title": "Dune"}]
+                if uid == "u-bob":
+                    return [{"id": "dune-1", "title": "Dune"}]
+                return []
+            if "FROM novels WHERE id = ?" in sql:
+                slug = params[0]
+                if slug == "dune":
+                    return [{"id": "dune", "user_id": "u-alice", "is_public": 0}]
+                if slug == "dune-1":
+                    return [{"id": "dune-1", "user_id": "u-bob", "is_public": 0}]
+                return []
+            return []
+
+    alice_key = f"{STUDENT_AUDIO_PREFIX}dune/chapter_1/0.opus"
+    bob_key = f"{STUDENT_AUDIO_PREFIX}dune-1/chapter_1/0.opus"
+    fake = _install(monkeypatch, {alice_key: b"OggS-alice", bob_key: b"OggS-bob"})
+    monkeypatch.setattr("app.api.student_audio.get_d1_client", lambda: FakeD1())
+
+    # Bob requests 'dune' (base slug derived from title 'Dune') -> resolves to Bob's 'dune-1'
+    resp_bob = _run(
+        get_student_audio_paragraph(
+            "dune", "1", "0", caller=AuthenticatedUser(id="u-bob", username="bob")
+        )
+    )
+    assert _collect(resp_bob) == b"OggS-bob"
+
+    # Charlie (who has no copy of Dune) tries to read Alice's private 'dune' -> 404
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            get_student_audio_paragraph(
+                "dune", "1", "0", caller=AuthenticatedUser(id="u-charlie", username="charlie")
+            )
+        )
+    assert exc.value.status_code == 404
+

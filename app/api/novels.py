@@ -379,8 +379,8 @@ async def delete_novel(
             if not still_used:
                 r2_keys_to_delete.append(cover_key)
 
-        if r2_keys_to_delete:
-            def _delete_r2_keys(keys: list[str]) -> None:
+        if r2_keys_to_delete or target_slug:
+            def _delete_r2_keys(keys: list[str], slug: str) -> None:
                 try:
                     s3 = _r2_client()
                     bucket = _r2_bucket()
@@ -391,10 +391,26 @@ async def delete_novel(
                             s3.delete_object(Bucket=bucket, Key=k)
                         except Exception:
                             pass
+                    # Also clean up any pre-rendered StyleTTS student audio and worker
+                    # manifests scoped to this exact novel slug.
+                    if hasattr(s3, "get_paginator"):
+                        for prefix in (
+                            f"audio-student/styletts2-eye-v1/{slug}/",
+                            f"student_tts/novels/{slug}/",
+                            f"student_tts/coord/{slug}/",
+                        ):
+                            try:
+                                for page in s3.get_paginator("list_objects_v2").paginate(
+                                    Bucket=bucket, Prefix=prefix
+                                ):
+                                    for obj in page.get("Contents") or []:
+                                        s3.delete_object(Bucket=bucket, Key=obj["Key"])
+                            except Exception:
+                                pass
                 except Exception:
                     pass
 
-            await run_in_threadpool(_delete_r2_keys, r2_keys_to_delete)
+            await run_in_threadpool(_delete_r2_keys, r2_keys_to_delete, target_slug)
 
         get_chapter_paragraphs.cache_clear()
         logger.info(
@@ -532,7 +548,7 @@ async def novel_with_tts(
     caller: AuthenticatedUser = Depends(_tts_rate_limit),
 ):
     try:
-        chapter = await fetch_chapter(chapterNumber, novelName)
+        chapter = await fetch_chapter(chapterNumber, novelName, caller=caller)
         paragraphs    = chapter.get("content", [])
         chapter_title = chapter.get("chapterTitle", "Unknown Title")
         
