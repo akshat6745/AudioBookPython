@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 
 STYLETTS_RUNTIME = "styletts2-eye-v1"
-STYLETTS_VERSION = "2026-11-02.1"
-VOICE_BANK = "higgs_us_ava_pp0_50st_fp0_00st_d18"
+STYLETTS_VERSION = "2026-11-10.1"
+VOICE_BANK = "edge_ava_exact_d0"
+NARRATOR_ENGINE = "edge_tts"
+NARRATOR_VOICE = "en-US-AvaMultilingualNeural"
 TAGGER_RUNTIME = "emotion-tagger-v1"
 TAGGER_MODEL = "deberta3large_teacher2+deberta3_teacher2"
 TAGGER_VERSION = "2026-10-20.1"
@@ -35,8 +37,8 @@ STYLE_MIX_PROSODY = (0.7, 0.3)  # predicted, reference
 STYLE_MIX_ACOUSTIC = (0.3, 0.7)
 NARRATOR_ALPHA = 0.05
 NARRATOR_BETA = 0.7
-NARRATOR_EMBEDDING_SCALE = 1.12
-NARRATOR_F0_SCALE = 1.0293
+NARRATOR_EMBEDDING_SCALE = 1.0
+NARRATOR_F0_SCALE = 1.0
 NARRATOR_TARGET_DB = -19.0
 DIALOGUE_ALPHA = 0.3
 DIALOGUE_BETA = 0.7
@@ -74,8 +76,8 @@ KNOWN_SHA256 = {
     "jdc/bst.t7": "54dc94364b97e18ac1dfa6287714ed121248cfaac4cfd39d061c6e0a089ef169",
     "plbert/step_1000000.t7": "0714ff85804db43e06b3b0ac5749bf90cf206257c6c5916e8a98c5933b4c21e0",
     "plbert/config.yml": "e5eb4151f130ceae8dd2538f90aced3b66fcad5afa46724b36be435725decdde",
-    "style_bank/bank.npz": "10830858d385835be1be9111598e98d20612ddcdcd9ef076f0d6f264fdbd84d9",
-    "style_bank/bank.json": "f64022a3dc295b14db69468acc5688c19f07ef7c3a136bc274716b433083a193",
+    "style_bank/bank.npz": "9382caee01b4ecbb78ae46fcb895eaeab1072d6aeb6d86dbb1941f6520f167ef",
+    "style_bank/bank.json": "3841b1f1a41f6c10f703425e034fa939231ecc90b4db4d5d4152a69140941508",
 }
 
 KNOWN_BYTES = {
@@ -87,7 +89,7 @@ KNOWN_BYTES = {
     "plbert/step_1000000.t7": 25185187,
     "plbert/config.yml": 915,
     "style_bank/bank.npz": 102664,
-    "style_bank/bank.json": 52246,
+    "style_bank/bank.json": 51344,
 }
 
 

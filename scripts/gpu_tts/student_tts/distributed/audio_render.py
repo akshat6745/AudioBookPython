@@ -40,6 +40,105 @@ def _postfx():
     return postfx
 
 
+def _trim_edge_silence(audio: np.ndarray, sr: int = layout.SAMPLE_RATE) -> np.ndarray:
+    """Trim only leading/trailing MP3 padding silence without dropping any speech islands."""
+    n = int(0.01 * sr)
+    k = len(audio) // n
+    if k < 5:
+        return audio.astype(np.float32, copy=True)
+    rms = np.sqrt(np.mean(audio[: k * n].reshape(k, n) ** 2, axis=1))
+    db = 20.0 * np.log10(rms + 1e-9)
+    level = float(np.percentile(db, 90))
+    voiced = np.nonzero(db > level - 45.0)[0]
+    if not len(voiced):
+        return audio.astype(np.float32, copy=True)
+    lo = max(0, int(voiced[0]) * n - int(0.03 * sr))
+    hi = min(len(audio), (int(voiced[-1]) + 1) * n + int(0.06 * sr))
+    out = audio[lo:hi].astype(np.float32, copy=True)
+    fi = min(int(0.005 * sr), len(out))
+    fo = min(int(0.015 * sr), len(out))
+    if fi > 0:
+        out[:fi] *= np.linspace(0.0, 1.0, fi, dtype=np.float32)
+    if fo > 0:
+        out[-fo:] *= np.linspace(1.0, 0.0, fo, dtype=np.float32)
+    return out
+
+
+def _level_edge_audio(audio: np.ndarray, sr: int = layout.SAMPLE_RATE, target_db: float = -19.0) -> np.ndarray:
+    """Linearly match speech RMS level without nonlinear tanh soft-clipping."""
+    postfx = _postfx()
+    leveled = postfx.match_level(audio, sr, target_db=target_db)
+    peak = float(np.abs(leveled).max()) if len(leveled) else 0.0
+    if peak > 0.96:
+        leveled = (leveled * (0.96 / peak)).astype(np.float32)
+    return leveled
+
+
+def _synth_edge_chunks(
+    texts: list[str],
+    voice: str = "en-US-AvaMultilingualNeural",
+    sr: int = layout.SAMPLE_RATE,
+    concurrency: int = 8,
+) -> list[np.ndarray]:
+    """Synthesize narrator text chunks directly with edge_tts at 24 kHz."""
+    if not texts:
+        return []
+    import asyncio
+    import re
+    from concurrent.futures import ThreadPoolExecutor
+
+    import edge_tts
+
+    async def _one(text: str, sem: asyncio.Semaphore) -> np.ndarray:
+        cleaned = re.sub(r"\*\s*\*\s*\*", " ", text or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if not cleaned or not re.search(r"[A-Za-z0-9]", cleaned):
+            return np.zeros(int(sr * 0.25), dtype=np.float32)
+        async with sem:
+            last_exc: Exception | None = None
+            for attempt in range(4):
+                try:
+                    buf = bytearray()
+                    comm = edge_tts.Communicate(cleaned, voice)
+                    async for chunk in comm.stream():
+                        if chunk["type"] == "audio":
+                            buf.extend(chunk["data"])
+                    if not buf:
+                        raise RuntimeError(f"edge_tts returned empty audio for {cleaned[:40]!r}")
+                    proc = subprocess.run(
+                        [
+                            "ffmpeg", "-nostdin", "-loglevel", "error",
+                            "-f", "mp3", "-i", "pipe:0",
+                            "-f", "f32le", "-ac", "1", "-ar", str(sr), "pipe:1",
+                        ],
+                        input=bytes(buf),
+                        capture_output=True,
+                        check=True,
+                    )
+                    raw = np.frombuffer(proc.stdout, dtype=np.float32).copy()
+                    if len(raw) == 0:
+                        raise RuntimeError("ffmpeg decoded 0 samples")
+                    return _trim_edge_silence(raw, sr)
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 3:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+            raise RuntimeError(f"edge_tts failed after 4 attempts: {last_exc}") from last_exc
+
+    async def _batch() -> list[np.ndarray]:
+        sem = asyncio.Semaphore(max(1, concurrency))
+        return list(await asyncio.gather(*(_one(t, sem) for t in texts)))
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        return asyncio.run(_batch())
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(_batch())).result()
+
+
 def _write_wav(path: Path, audio: np.ndarray, sr: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as handle:
@@ -81,6 +180,8 @@ class Speaker:
     def jobs_for(self, chunks: list[dict], key: tuple) -> list[dict]:
         jobs = []
         ip = getattr(self.bank, "inference_params", {}) or {}
+        nar_engine = str(ip.get("narrator_engine") or getattr(layout, "NARRATOR_ENGINE", "styletts2"))
+        nar_voice = str(ip.get("narrator_voice") or getattr(layout, "NARRATOR_VOICE", "en-US-AvaMultilingualNeural"))
         for index, chunk in enumerate(chunks):
             is_nar = chunk["voice"] == "narrator"
             alpha = float(ip.get("alpha", layout.NARRATOR_ALPHA)) if is_nar else layout.DIALOGUE_ALPHA
@@ -90,6 +191,15 @@ class Speaker:
             spd = float(ip.get("speed", ip.get("length_scale", 1.0))) if is_nar else 1.0
             t_db = float(ip.get("narrator_target_db", layout.NARRATOR_TARGET_DB)) if is_nar else float(ip.get("dialogue_target_db", layout.DIALOGUE_TARGET_DB))
             entry = self.bank.pick(chunk["voice"], chunk["emotion"], *key)
+            if is_nar and nar_engine == "edge_tts":
+                jobs.append({
+                    "chunk": index, "part": 0, "parts": 1, "text": chunk["text"],
+                    "voice": chunk["voice"], "engine": "edge_tts", "edge_voice": nar_voice,
+                    "alpha": alpha, "beta": beta, "embedding_scale": esc,
+                    "f0_scale": f0_sc, "speed": spd, "target_db": t_db, "tokens": [], "entry": entry,
+                    "seed": seed_for(*key, index),
+                })
+                continue
             tokens = self.student.tokens(chunk["text"])
             parts = [(chunk["text"], tokens)]
             if len(tokens) > layout.MAX_PHONEME_TOKENS:
@@ -98,7 +208,7 @@ class Speaker:
                 seed = seed_for(*key, index) if part == 0 else seed_for(*key, index, part)
                 jobs.append({
                     "chunk": index, "part": part, "parts": len(parts), "text": text,
-                    "voice": chunk["voice"], "alpha": alpha, "beta": beta, "embedding_scale": esc,
+                    "voice": chunk["voice"], "engine": "styletts2", "alpha": alpha, "beta": beta, "embedding_scale": esc,
                     "f0_scale": f0_sc, "speed": spd, "target_db": t_db, "tokens": toks, "entry": entry, "seed": seed,
                 })
         return jobs
@@ -107,20 +217,30 @@ class Speaker:
         import torch
 
         postfx = _postfx()
-        groups = group_batches([len(job["tokens"]) for job in jobs], self.batch, self.token_budget)
         out: list = [None] * len(jobs)
-        for group in groups:
-            ref = torch.cat([self.student.bank_style(self.bank.vectors, jobs[index]["entry"]["index"]) for index in group])
-            audios = self.student.infer_batch(
-                [jobs[index]["tokens"] for index in group], ref, [jobs[index]["seed"] for index in group],
-                alphas=[jobs[index]["alpha"] for index in group],
-                betas=[jobs[index]["beta"] for index in group],
-                embedding_scales=[jobs[index]["embedding_scale"] for index in group],
-                f0_scales=[jobs[index]["f0_scale"] for index in group],
-                speeds=[jobs[index].get("speed", 1.0) for index in group],
-            )
-            for index, audio in zip(group, audios):
-                out[index] = postfx.tidy(audio, layout.SAMPLE_RATE)[0]
+        edge_indices = [index for index, job in enumerate(jobs) if job.get("engine") == "edge_tts"]
+        if edge_indices:
+            edge_voice = jobs[edge_indices[0]].get("edge_voice", "en-US-AvaMultilingualNeural")
+            edge_audios = _synth_edge_chunks([jobs[index]["text"] for index in edge_indices], voice=edge_voice, sr=layout.SAMPLE_RATE)
+            for index, audio in zip(edge_indices, edge_audios):
+                out[index] = audio
+
+        st_indices = [index for index, job in enumerate(jobs) if job.get("engine") != "edge_tts"]
+        if st_indices:
+            groups = group_batches([len(jobs[index]["tokens"]) for index in st_indices], self.batch, self.token_budget)
+            for local_group in groups:
+                group = [st_indices[i] for i in local_group]
+                ref = torch.cat([self.student.bank_style(self.bank.vectors, jobs[index]["entry"]["index"]) for index in group])
+                audios = self.student.infer_batch(
+                    [jobs[index]["tokens"] for index in group], ref, [jobs[index]["seed"] for index in group],
+                    alphas=[jobs[index]["alpha"] for index in group],
+                    betas=[jobs[index]["beta"] for index in group],
+                    embedding_scales=[jobs[index]["embedding_scale"] for index in group],
+                    f0_scales=[jobs[index]["f0_scale"] for index in group],
+                    speeds=[jobs[index].get("speed", 1.0) for index in group],
+                )
+                for index, audio in zip(group, audios):
+                    out[index] = postfx.tidy(audio, layout.SAMPLE_RATE)[0]
         return out
 
     def stitch(self, chunks, jobs, audios, silence_s: float):
@@ -134,11 +254,14 @@ class Speaker:
                     "fallback": entry["fallback"], **({"split_parts": job["parts"]} if job["parts"] > 1 else {}),
                 })
             t_db = job.get("target_db", layout.NARRATOR_TARGET_DB if chunks[job["chunk"]]["voice"] == "narrator" else layout.DIALOGUE_TARGET_DB)
-            leveled = postfx.match_level(audio, layout.SAMPLE_RATE, target_db=t_db)
-            if t_db > -20.0:
-                peak = float(np.abs(leveled).max())
-                if peak > 0.88:
-                    leveled = (0.88 * np.tanh(leveled / 0.88)).astype(np.float32)
+            if job.get("engine") == "edge_tts":
+                leveled = _level_edge_audio(audio, layout.SAMPLE_RATE, target_db=t_db)
+            else:
+                leveled = postfx.match_level(audio, layout.SAMPLE_RATE, target_db=t_db)
+                if t_db > -20.0:
+                    peak = float(np.abs(leveled).max())
+                    if peak > 0.88:
+                        leveled = (0.88 * np.tanh(leveled / 0.88)).astype(np.float32)
             pieces += [leveled, np.zeros(int(layout.SAMPLE_RATE * CHUNK_GAP_S), np.float32)]
         if not pieces:
             return np.zeros(int(layout.SAMPLE_RATE * silence_s), np.float32), styles
