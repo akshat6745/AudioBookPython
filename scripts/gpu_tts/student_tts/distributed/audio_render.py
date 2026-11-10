@@ -64,10 +64,114 @@ def _trim_edge_silence(audio: np.ndarray, sr: int = layout.SAMPLE_RATE) -> np.nd
     return out
 
 
-def _level_edge_audio(audio: np.ndarray, sr: int = layout.SAMPLE_RATE, target_db: float = -19.0) -> np.ndarray:
-    """Linearly match speech RMS level without nonlinear tanh soft-clipping."""
+_EDGE_AVA_EMOTION_PROSODY: dict[str, dict] = {
+    "neutral":       {"rate_pct":  0, "pitch_hz":  0, "vol_pct":  0, "db_offset":  0.00, "para_gap_s": 0.35},
+    "fear":          {"rate_pct": +7, "pitch_hz": +2, "vol_pct": +3, "db_offset": +0.45, "para_gap_s": 0.24},
+    "sadness":       {"rate_pct": -8, "pitch_hz": -2, "vol_pct": -4, "db_offset": -0.75, "para_gap_s": 0.50},
+    "anger":         {"rate_pct": +5, "pitch_hz": +2, "vol_pct": +6, "db_offset": +0.60, "para_gap_s": 0.25},
+    "surprise":      {"rate_pct": +6, "pitch_hz": +3, "vol_pct": +5, "db_offset": +0.45, "para_gap_s": 0.26},
+    "determination": {"rate_pct": +3, "pitch_hz": -2, "vol_pct": +5, "db_offset": +0.50, "para_gap_s": 0.28},
+    "affection":     {"rate_pct": -5, "pitch_hz": -1, "vol_pct": -2, "db_offset": -0.45, "para_gap_s": 0.44},
+    "amusement":     {"rate_pct": +4, "pitch_hz": +2, "vol_pct": +3, "db_offset": +0.30, "para_gap_s": 0.30},
+    "bitterness":    {"rate_pct": -4, "pitch_hz": -2, "vol_pct": +2, "db_offset": +0.10, "para_gap_s": 0.38},
+    "contemplation": {"rate_pct": -6, "pitch_hz": -2, "vol_pct": -2, "db_offset": -0.45, "para_gap_s": 0.46},
+    "awe":           {"rate_pct": -6, "pitch_hz": +2, "vol_pct": +2, "db_offset": +0.15, "para_gap_s": 0.48},
+    "confusion":     {"rate_pct": -3, "pitch_hz": +2, "vol_pct":  0, "db_offset":  0.00, "para_gap_s": 0.36},
+    "contentment":   {"rate_pct": -4, "pitch_hz": -1, "vol_pct": -2, "db_offset": -0.35, "para_gap_s": 0.42},
+    "disgust":       {"rate_pct": -3, "pitch_hz": -2, "vol_pct": +2, "db_offset": +0.15, "para_gap_s": 0.36},
+    "elation":       {"rate_pct": +7, "pitch_hz": +3, "vol_pct": +5, "db_offset": +0.50, "para_gap_s": 0.26},
+    "enthusiasm":    {"rate_pct": +6, "pitch_hz": +2, "vol_pct": +4, "db_offset": +0.45, "para_gap_s": 0.27},
+    "helplessness":  {"rate_pct": -7, "pitch_hz": -2, "vol_pct": -4, "db_offset": -0.70, "para_gap_s": 0.48},
+    "longing":       {"rate_pct": -7, "pitch_hz": -2, "vol_pct": -3, "db_offset": -0.50, "para_gap_s": 0.48},
+    "pride":         {"rate_pct": -2, "pitch_hz": -1, "vol_pct": +4, "db_offset": +0.40, "para_gap_s": 0.34},
+    "relief":        {"rate_pct": -5, "pitch_hz": -2, "vol_pct": -2, "db_offset": -0.40, "para_gap_s": 0.45},
+    "shame":         {"rate_pct": -7, "pitch_hz": -2, "vol_pct": -4, "db_offset": -0.65, "para_gap_s": 0.48},
+}
+
+
+def _edge_prosody_for_chunk(text: str, emotion: str = "neutral", confidence: float = 0.0, seed: int = 0) -> dict:
+    import re
+
+    emo = (emotion or "neutral").strip().lower()
+    conf = float(confidence if confidence is not None else 0.0)
+    cleaned = (text or "").strip()
+    if len(cleaned) <= 25 and not re.search(r"[.!?]", cleaned):
+        return {"rate": "-6%", "pitch": "+0Hz", "volume": "+0%", "db_offset": 0.0, "para_gap_s": 0.55, "cue": "heading"}
+
+    cfg = _EDGE_AVA_EMOTION_PROSODY.get(emo, _EDGE_AVA_EMOTION_PROSODY["neutral"])
+    if emo != "neutral" and conf > 0.0:
+        scale = min(1.0, max(0.45, (conf - 0.25) / 0.55))
+    elif emo != "neutral":
+        scale = 0.80
+    else:
+        scale = 1.0
+
+    rate_pct = int(round(cfg["rate_pct"] * scale))
+    pitch_hz = int(round(cfg["pitch_hz"] * scale))
+    vol_pct = int(round(cfg["vol_pct"] * scale))
+    db_off = round(cfg["db_offset"] * scale, 2)
+    para_gap_s = round(0.35 + (cfg["para_gap_s"] - 0.35) * scale, 2)
+    cue = emo
+
+    if re.search(
+        r"\b(?:whisper(?:ed|ing|s)?|sigh(?:ed|ing|s)?|murmur(?:ed|ing|s)?|mutter(?:ed|ing|s)?|"
+        r"quiet(?:ly)?|soft(?:ly)?|hushed|voice\s+low|sad\s+peep|under\s+(?:his|her|their)\s+breath|"
+        r"barely\s+audible|faint(?:ly)?)\b",
+        cleaned, re.I,
+    ):
+        rate_pct = min(rate_pct, -5)
+        pitch_hz = min(pitch_hz, -2)
+        vol_pct = min(vol_pct, -3)
+        db_off = min(db_off, -0.65)
+        para_gap_s = max(para_gap_s, 0.44)
+        cue = f"{cue}+hushed" if cue != "neutral" else "hushed"
+    elif re.search(
+        r"\b(?:suddenly|abruptly|froze|snapped|crashed|vanished|exploded|struck|lunged|"
+        r"shattered|bolted|flashed|roared|slammed|alarm|panic|danger)\b",
+        cleaned, re.I,
+    ) or cleaned.endswith("!"):
+        rate_pct = max(rate_pct, +5)
+        pitch_hz = max(pitch_hz, +2)
+        vol_pct = max(vol_pct, +3)
+        db_off = max(db_off, +0.40)
+        para_gap_s = min(para_gap_s, 0.26)
+        cue = f"{cue}+urgent" if cue != "neutral" else "urgent"
+    elif (re.search(
+        r"\b(?:pensive|silence|silently|eyes\s+closed|cycling|waited|waiting|remembered|"
+        r"memories|funeral|death|shadow(?:s)?|thought(?:s|ful)?|brooding|stillness)\b",
+        cleaned, re.I,
+    ) or "—" in cleaned or "…" in cleaned) and emo == "neutral":
+        rate_pct, pitch_hz, vol_pct, db_off, para_gap_s, cue = -4, -1, -1, -0.30, 0.42, "reflective"
+    elif cleaned.endswith("?") and emo == "neutral":
+        rate_pct, pitch_hz, db_off, cue = -2, +2, +0.10, "question"
+    elif emo == "neutral":
+        slot = int(seed if seed else int(hashlib.sha256(cleaned.encode()).hexdigest()[:6], 16)) % 3
+        if slot == 0:
+            rate_pct, pitch_hz, db_off, para_gap_s = -2, -1, -0.20, 0.38
+        elif slot == 1:
+            rate_pct, pitch_hz, db_off, para_gap_s = 0, 0, 0.00, 0.35
+        else:
+            rate_pct, pitch_hz, db_off, para_gap_s = +2, +1, +0.15, 0.32
+        cue = f"neutral_v{slot}"
+
+    rate_pct = max(-10, min(9, rate_pct))
+    pitch_hz = max(-3, min(3, pitch_hz))
+    vol_pct = max(-6, min(6, vol_pct))
+    db_off = max(-0.85, min(0.65, db_off))
+    return {
+        "rate": f"{rate_pct:+d}%",
+        "pitch": f"{pitch_hz:+d}Hz",
+        "volume": f"{vol_pct:+d}%",
+        "db_offset": round(db_off, 2),
+        "para_gap_s": round(para_gap_s, 2),
+        "cue": cue,
+    }
+
+
+def _level_edge_audio(audio: np.ndarray, sr: int = layout.SAMPLE_RATE, target_db: float = -19.0, db_offset: float = 0.0) -> np.ndarray:
+    """Linearly match speech RMS level (with dynamic emotion db_offset) without nonlinear tanh soft-clipping."""
     postfx = _postfx()
-    leveled = postfx.match_level(audio, sr, target_db=target_db)
+    leveled = postfx.match_level(audio, sr, target_db=target_db + float(db_offset))
     peak = float(np.abs(leveled).max()) if len(leveled) else 0.0
     if peak > 0.96:
         leveled = (leveled * (0.96 / peak)).astype(np.float32)
@@ -75,13 +179,13 @@ def _level_edge_audio(audio: np.ndarray, sr: int = layout.SAMPLE_RATE, target_db
 
 
 def _synth_edge_chunks(
-    texts: list[str],
+    items: list[str | dict],
     voice: str = "en-US-AvaMultilingualNeural",
     sr: int = layout.SAMPLE_RATE,
     concurrency: int = 8,
 ) -> list[np.ndarray]:
-    """Synthesize narrator text chunks directly with edge_tts at 24 kHz."""
-    if not texts:
+    """Synthesize narrator text chunks directly with edge_tts at 24 kHz with non-monotonic storytelling prosody."""
+    if not items:
         return []
     import asyncio
     import re
@@ -89,8 +193,24 @@ def _synth_edge_chunks(
 
     import edge_tts
 
-    async def _one(text: str, sem: asyncio.Semaphore) -> np.ndarray:
-        cleaned = re.sub(r"\*\s*\*\s*\*", " ", text or "")
+    async def _one(item: str | dict, sem: asyncio.Semaphore) -> np.ndarray:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "")
+            prosody = _edge_prosody_for_chunk(
+                text,
+                emotion=str(item.get("emotion") or "neutral"),
+                confidence=float(item.get("confidence", 0.0)),
+                seed=int(item.get("seed", 0)),
+            )
+            rate = str(item.get("rate") or prosody["rate"])
+            pitch = str(item.get("pitch") or prosody["pitch"])
+            volume = str(item.get("volume") or prosody["volume"])
+        else:
+            text = str(item or "")
+            prosody = _edge_prosody_for_chunk(text)
+            rate, pitch, volume = prosody["rate"], prosody["pitch"], prosody["volume"]
+
+        cleaned = re.sub(r"\*\s*\*\s*\*", " ", text)
         cleaned = re.sub(r"\s+", " ", cleaned).strip()
         if not cleaned or not re.search(r"[A-Za-z0-9]", cleaned):
             return np.zeros(int(sr * 0.25), dtype=np.float32)
@@ -99,7 +219,7 @@ def _synth_edge_chunks(
             for attempt in range(4):
                 try:
                     buf = bytearray()
-                    comm = edge_tts.Communicate(cleaned, voice)
+                    comm = edge_tts.Communicate(cleaned, voice, rate=rate, pitch=pitch, volume=volume)
                     async for chunk in comm.stream():
                         if chunk["type"] == "audio":
                             buf.extend(chunk["data"])
@@ -127,7 +247,7 @@ def _synth_edge_chunks(
 
     async def _batch() -> list[np.ndarray]:
         sem = asyncio.Semaphore(max(1, concurrency))
-        return list(await asyncio.gather(*(_one(t, sem) for t in texts)))
+        return list(await asyncio.gather(*(_one(it, sem) for it in items)))
 
     try:
         loop = asyncio.get_running_loop()
@@ -192,12 +312,22 @@ class Speaker:
             t_db = float(ip.get("narrator_target_db", layout.NARRATOR_TARGET_DB)) if is_nar else float(ip.get("dialogue_target_db", layout.DIALOGUE_TARGET_DB))
             entry = self.bank.pick(chunk["voice"], chunk["emotion"], *key)
             if is_nar and nar_engine == "edge_tts":
+                seed = seed_for(*key, index)
+                prosody = _edge_prosody_for_chunk(
+                    chunk["text"],
+                    emotion=chunk.get("emotion", "neutral"),
+                    confidence=float(chunk.get("confidence", 0.0)),
+                    seed=seed,
+                )
                 jobs.append({
                     "chunk": index, "part": 0, "parts": 1, "text": chunk["text"],
                     "voice": chunk["voice"], "engine": "edge_tts", "edge_voice": nar_voice,
+                    "emotion": chunk.get("emotion", "neutral"),
+                    "confidence": float(chunk.get("confidence", 0.0)),
+                    "prosody": prosody,
                     "alpha": alpha, "beta": beta, "embedding_scale": esc,
                     "f0_scale": f0_sc, "speed": spd, "target_db": t_db, "tokens": [], "entry": entry,
-                    "seed": seed_for(*key, index),
+                    "seed": seed,
                 })
                 continue
             tokens = self.student.tokens(chunk["text"])
@@ -221,7 +351,17 @@ class Speaker:
         edge_indices = [index for index, job in enumerate(jobs) if job.get("engine") == "edge_tts"]
         if edge_indices:
             edge_voice = jobs[edge_indices[0]].get("edge_voice", "en-US-AvaMultilingualNeural")
-            edge_audios = _synth_edge_chunks([jobs[index]["text"] for index in edge_indices], voice=edge_voice, sr=layout.SAMPLE_RATE)
+            edge_items = [
+                {
+                    "text": jobs[index]["text"],
+                    "emotion": jobs[index].get("emotion", "neutral"),
+                    "confidence": jobs[index].get("confidence", 0.0),
+                    "seed": jobs[index].get("seed", 0),
+                    **(jobs[index].get("prosody") or {}),
+                }
+                for index in edge_indices
+            ]
+            edge_audios = _synth_edge_chunks(edge_items, voice=edge_voice, sr=layout.SAMPLE_RATE)
             for index, audio in zip(edge_indices, edge_audios):
                 out[index] = audio
 
@@ -255,7 +395,13 @@ class Speaker:
                 })
             t_db = job.get("target_db", layout.NARRATOR_TARGET_DB if chunks[job["chunk"]]["voice"] == "narrator" else layout.DIALOGUE_TARGET_DB)
             if job.get("engine") == "edge_tts":
-                leveled = _level_edge_audio(audio, layout.SAMPLE_RATE, target_db=t_db)
+                prosody = job.get("prosody") or {}
+                leveled = _level_edge_audio(
+                    audio,
+                    layout.SAMPLE_RATE,
+                    target_db=t_db,
+                    db_offset=float(prosody.get("db_offset", 0.0)),
+                )
             else:
                 leveled = postfx.match_level(audio, layout.SAMPLE_RATE, target_db=t_db)
                 if t_db > -20.0:
@@ -265,7 +411,10 @@ class Speaker:
             pieces += [leveled, np.zeros(int(layout.SAMPLE_RATE * CHUNK_GAP_S), np.float32)]
         if not pieces:
             return np.zeros(int(layout.SAMPLE_RATE * silence_s), np.float32), styles
-        pieces[-1] = np.zeros(int(layout.SAMPLE_RATE * PARA_GAP_S), np.float32)
+        last_gap_s = PARA_GAP_S
+        if jobs and jobs[-1].get("engine") == "edge_tts":
+            last_gap_s = float((jobs[-1].get("prosody") or {}).get("para_gap_s", PARA_GAP_S))
+        pieces[-1] = np.zeros(int(layout.SAMPLE_RATE * last_gap_s), np.float32)
         return np.concatenate(pieces), styles
 
 

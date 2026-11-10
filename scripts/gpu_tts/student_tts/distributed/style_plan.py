@@ -65,18 +65,37 @@ def _higgs():
 
 def plan_paragraph(paragraph: str, tag: dict) -> list[dict]:
     """Same narrator/dialogue split as bank_tts.plan_paragraph. Watermarks yield no speech."""
+    import re
+
     hf = _higgs()
     if hf.is_watermark(paragraph):
         return []
-    out = []
-    for voice, units in hf.format_dual(paragraph, tag, hf.Cuts()):
-        for chunk in hf.chunks(units, MAX_CHARS):
-            import re
 
+    def _repl(match: re.Match) -> str:
+        inner = match.group(1).strip()
+        if re.match(r"^(?:IMAGE:|Title\s+Page$|Prologue$|Epilogue$|Chapter\s+\w+|Part\s+\w+|Book\s+\w+)", inner, re.I) or len(inner.split()) < 2:
+            return match.group(0)
+        return f"“{inner}”"
+
+    norm_para = re.sub(r"\[([^\[\]]+)\]", _repl, paragraph)
+    tag_emo = str(tag.get("emotion") or "neutral")
+    tag_conf = float(tag.get("confidence") or 0.0)
+    out = []
+    for voice, units in hf.format_dual(norm_para, tag, hf.Cuts()):
+        for chunk in hf.chunks(units, MAX_CHARS):
             match = re.match(r"<\|emotion:([a-z_]+)\|>", chunk)
             text = hf.plain(chunk).strip()
             if text:
-                out.append({"voice": voice, "emotion": match.group(1) if match else "neutral", "text": text})
+                emo = match.group(1) if match else "neutral"
+                if voice == "narrator" and emo == "neutral" and tag_emo != "neutral" and tag_conf >= 0.40:
+                    emo = tag_emo
+                out.append({
+                    "voice": voice,
+                    "emotion": emo,
+                    "tag_emotion": tag_emo,
+                    "confidence": tag_conf,
+                    "text": text,
+                })
     return out
 
 
