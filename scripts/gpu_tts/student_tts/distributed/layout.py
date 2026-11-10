@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 
 STYLETTS_RUNTIME = "styletts2-eye-v1"
-STYLETTS_VERSION = "2026-11-10.1"
-VOICE_BANK = "edge_ava_exact_d0"
+STYLETTS_VERSION = "2026-11-10.2"
+VOICE_BANK = "edge_ava_expressive_v1"
 NARRATOR_ENGINE = "edge_tts"
 NARRATOR_VOICE = "en-US-AvaMultilingualNeural"
 TAGGER_RUNTIME = "emotion-tagger-v1"
@@ -77,7 +77,7 @@ KNOWN_SHA256 = {
     "plbert/step_1000000.t7": "0714ff85804db43e06b3b0ac5749bf90cf206257c6c5916e8a98c5933b4c21e0",
     "plbert/config.yml": "e5eb4151f130ceae8dd2538f90aced3b66fcad5afa46724b36be435725decdde",
     "style_bank/bank.npz": "9382caee01b4ecbb78ae46fcb895eaeab1072d6aeb6d86dbb1941f6520f167ef",
-    "style_bank/bank.json": "3841b1f1a41f6c10f703425e034fa939231ecc90b4db4d5d4152a69140941508",
+    "style_bank/bank.json": "b417e7686deba15c530aead0b407b18825050d86811b4c9533d7a3397c15614d",
 }
 
 KNOWN_BYTES = {
@@ -89,7 +89,7 @@ KNOWN_BYTES = {
     "plbert/step_1000000.t7": 25185187,
     "plbert/config.yml": 915,
     "style_bank/bank.npz": 102664,
-    "style_bank/bank.json": 51344,
+    "style_bank/bank.json": 51681,
 }
 
 

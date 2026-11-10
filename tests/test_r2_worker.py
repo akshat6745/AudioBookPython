@@ -711,3 +711,25 @@ def test_multi_user_same_title_uploads_discover_and_resolve_cleanly():
     store.delete("novels/dune/chapter_1.txt")
     assert resolve_or_discover_novel(store, "Dune")["slug"] == "dune-1"
 
+
+def test_edge_ava_non_monotonic_prosody_and_bracket_dialogue():
+    from scripts.gpu_tts.student_tts.distributed.style_plan import plan_paragraph
+
+    # 1. Bracketed telepathic speech ([...]) in Cradle splits to dialogue while preserving narrator emotion
+    chunks = plan_paragraph(
+        "[He looks like he’s walking to his death,] Dross said.",
+        {"emotion": "sadness", "confidence": 0.99, "style": "none", "sfx": "none"},
+    )
+    assert [c["voice"] for c in chunks] == ["dialogue", "narrator"]
+    assert chunks[0]["emotion"] == "sadness"
+    assert chunks[1]["emotion"] == "sadness"
+
+    # 2. Mixed paragraphs preserve narrator emotion down to confidence >= 0.40
+    mixed = plan_paragraph(
+        "Yerin sighed. “I’m the same kind of fool as you, I guess.”",
+        {"emotion": "sadness", "confidence": 0.75, "style": "none", "sfx": "none"},
+    )
+    assert [c["voice"] for c in mixed] == ["narrator", "dialogue"]
+    assert mixed[0]["emotion"] == "sadness"
+
+

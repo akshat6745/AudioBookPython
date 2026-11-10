@@ -182,16 +182,25 @@ def _synth_edge_chunks(
     items: list[str | dict],
     voice: str = "en-US-AvaMultilingualNeural",
     sr: int = layout.SAMPLE_RATE,
-    concurrency: int = 8,
+    concurrency: int = 16,
 ) -> list[np.ndarray]:
     """Synthesize narrator text chunks directly with edge_tts at 24 kHz with non-monotonic storytelling prosody."""
     if not items:
         return []
     import asyncio
+    import os
     import re
+    import sys
     from concurrent.futures import ThreadPoolExecutor
 
-    import edge_tts
+    try:
+        import edge_tts
+    except ModuleNotFoundError:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet", "edge-tts>=7.3.1"],
+            env={**os.environ, "PIP_CONFIG_FILE": "/dev/null"},
+        )
+        import edge_tts
 
     async def _one(item: str | dict, sem: asyncio.Semaphore) -> np.ndarray:
         if isinstance(item, dict):
@@ -344,43 +353,55 @@ class Speaker:
         return jobs
 
     def render(self, jobs: list[dict]) -> list[np.ndarray]:
+        from concurrent.futures import ThreadPoolExecutor
         import torch
 
         postfx = _postfx()
         out: list = [None] * len(jobs)
         edge_indices = [index for index, job in enumerate(jobs) if job.get("engine") == "edge_tts"]
-        if edge_indices:
-            edge_voice = jobs[edge_indices[0]].get("edge_voice", "en-US-AvaMultilingualNeural")
-            edge_items = [
-                {
-                    "text": jobs[index]["text"],
-                    "emotion": jobs[index].get("emotion", "neutral"),
-                    "confidence": jobs[index].get("confidence", 0.0),
-                    "seed": jobs[index].get("seed", 0),
-                    **(jobs[index].get("prosody") or {}),
-                }
-                for index in edge_indices
-            ]
-            edge_audios = _synth_edge_chunks(edge_items, voice=edge_voice, sr=layout.SAMPLE_RATE)
-            for index, audio in zip(edge_indices, edge_audios):
-                out[index] = audio
-
         st_indices = [index for index, job in enumerate(jobs) if job.get("engine") != "edge_tts"]
-        if st_indices:
-            groups = group_batches([len(jobs[index]["tokens"]) for index in st_indices], self.batch, self.token_budget)
-            for local_group in groups:
-                group = [st_indices[i] for i in local_group]
-                ref = torch.cat([self.student.bank_style(self.bank.vectors, jobs[index]["entry"]["index"]) for index in group])
-                audios = self.student.infer_batch(
-                    [jobs[index]["tokens"] for index in group], ref, [jobs[index]["seed"] for index in group],
-                    alphas=[jobs[index]["alpha"] for index in group],
-                    betas=[jobs[index]["beta"] for index in group],
-                    embedding_scales=[jobs[index]["embedding_scale"] for index in group],
-                    f0_scales=[jobs[index]["f0_scale"] for index in group],
-                    speeds=[jobs[index].get("speed", 1.0) for index in group],
-                )
-                for index, audio in zip(group, audios):
-                    out[index] = postfx.tidy(audio, layout.SAMPLE_RATE)[0]
+
+        edge_future = None
+        bg_edge = ThreadPoolExecutor(max_workers=1) if edge_indices else None
+        try:
+            if edge_indices and bg_edge is not None:
+                edge_voice = jobs[edge_indices[0]].get("edge_voice", "en-US-AvaMultilingualNeural")
+                edge_items = [
+                    {
+                        "text": jobs[index]["text"],
+                        "emotion": jobs[index].get("emotion", "neutral"),
+                        "confidence": jobs[index].get("confidence", 0.0),
+                        "seed": jobs[index].get("seed", 0),
+                        **(jobs[index].get("prosody") or {}),
+                    }
+                    for index in edge_indices
+                ]
+                edge_future = bg_edge.submit(_synth_edge_chunks, edge_items, edge_voice, layout.SAMPLE_RATE, 16)
+
+            if st_indices:
+                groups = group_batches([len(jobs[index]["tokens"]) for index in st_indices], self.batch, self.token_budget)
+                for local_group in groups:
+                    group = [st_indices[i] for i in local_group]
+                    ref = torch.cat([self.student.bank_style(self.bank.vectors, jobs[index]["entry"]["index"]) for index in group])
+                    audios = self.student.infer_batch(
+                        [jobs[index]["tokens"] for index in group], ref, [jobs[index]["seed"] for index in group],
+                        alphas=[jobs[index]["alpha"] for index in group],
+                        betas=[jobs[index]["beta"] for index in group],
+                        embedding_scales=[jobs[index]["embedding_scale"] for index in group],
+                        f0_scales=[jobs[index]["f0_scale"] for index in group],
+                        speeds=[jobs[index].get("speed", 1.0) for index in group],
+                    )
+                    for index, audio in zip(group, audios):
+                        out[index] = postfx.tidy(audio, layout.SAMPLE_RATE)[0]
+                self.student.sync()
+
+            if edge_future is not None:
+                edge_audios = edge_future.result()
+                for index, audio in zip(edge_indices, edge_audios):
+                    out[index] = audio
+        finally:
+            if bg_edge is not None:
+                bg_edge.shutdown(wait=True)
         return out
 
     def stitch(self, chunks, jobs, audios, silence_s: float):
@@ -389,10 +410,18 @@ class Speaker:
         for job, audio in zip(jobs, audios):
             if job["part"] == 0:
                 chunk, entry = chunks[job["chunk"]], job["entry"]
-                styles.append({
+                style_info = {
                     "voice": chunk["voice"], "emotion": chunk["emotion"], "style_index": entry["index"],
                     "fallback": entry["fallback"], **({"split_parts": job["parts"]} if job["parts"] > 1 else {}),
-                })
+                }
+                if job.get("engine") == "edge_tts":
+                    pr = job.get("prosody") or {}
+                    style_info["engine"] = "edge_tts"
+                    style_info["cue"] = pr.get("cue", chunk["emotion"])
+                    style_info["rate"] = pr.get("rate", "+0%")
+                    style_info["pitch"] = pr.get("pitch", "+0Hz")
+                    style_info["db_offset"] = pr.get("db_offset", 0.0)
+                styles.append(style_info)
             t_db = job.get("target_db", layout.NARRATOR_TARGET_DB if chunks[job["chunk"]]["voice"] == "narrator" else layout.DIALOGUE_TARGET_DB)
             if job.get("engine") == "edge_tts":
                 prosody = job.get("prosody") or {}
